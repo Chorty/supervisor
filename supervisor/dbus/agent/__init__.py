@@ -1,4 +1,5 @@
 """OS-Agent implementation for DBUS."""
+
 import asyncio
 from collections.abc import Awaitable
 import logging
@@ -7,7 +8,7 @@ from typing import Any
 from awesomeversion import AwesomeVersion
 from dbus_fast.aio.message_bus import MessageBus
 
-from ...exceptions import DBusError, DBusInterfaceError, DBusServiceUnkownError
+from ...exceptions import DBusInterfaceError, DBusServiceUnkownError
 from ..const import (
     DBUS_ATTR_DIAGNOSTICS,
     DBUS_ATTR_VERSION,
@@ -21,6 +22,7 @@ from .apparmor import AppArmor
 from .boards import BoardManager
 from .cgroup import CGroup
 from .datadisk import DataDisk
+from .swap import Swap
 from .system import System
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class OSAgent(DBusInterfaceProxy):
         self._board: BoardManager = BoardManager()
         self._cgroup: CGroup = CGroup()
         self._datadisk: DataDisk = DataDisk()
+        self._swap: Swap = Swap()
         self._system: System = System()
 
     @property
@@ -53,6 +56,11 @@ class OSAgent(DBusInterfaceProxy):
     def apparmor(self) -> AppArmor:
         """Return AppArmor DBUS object."""
         return self._apparmor
+
+    @property
+    def swap(self) -> Swap:
+        """Return Swap DBUS object."""
+        return self._swap
 
     @property
     def system(self) -> System:
@@ -81,27 +89,47 @@ class OSAgent(DBusInterfaceProxy):
         """Return if diagnostics is enabled on OS-Agent."""
         return self.properties[DBUS_ATTR_DIAGNOSTICS]
 
+    @dbus_connected
     def set_diagnostics(self, value: bool) -> Awaitable[None]:
         """Enable or disable OS-Agent diagnostics."""
-        return self.dbus.set_diagnostics(value)
+        return self.connected_dbus.set("diagnostics", value)
 
     @property
     def all(self) -> list[DBusInterface]:
         """Return all managed dbus interfaces."""
-        return [self.apparmor, self.board, self.cgroup, self.datadisk, self.system]
+        return [
+            self.apparmor,
+            self.board,
+            self.cgroup,
+            self.datadisk,
+            self.swap,
+            self.system,
+        ]
 
     async def connect(self, bus: MessageBus) -> None:
         """Connect to system's D-Bus."""
         _LOGGER.info("Load dbus interface %s", self.name)
         try:
             await super().connect(bus)
-            await asyncio.gather(*[dbus.connect(bus) for dbus in self.all])
-        except DBusError:
-            _LOGGER.warning("Can't connect to OS-Agent")
         except (DBusServiceUnkownError, DBusInterfaceError):
-            _LOGGER.warning(
+            _LOGGER.error(
                 "No OS-Agent support on the host. Some Host functions have been disabled."
             )
+            return
+
+        errors = await asyncio.gather(
+            *[dbus.connect(bus) for dbus in self.all], return_exceptions=True
+        )
+
+        for err in errors:
+            if err:
+                dbus = self.all[errors.index(err)]
+                _LOGGER.error(
+                    "Can't load OS Agent dbus interface %s %s: %s",
+                    dbus.bus_name,
+                    dbus.object_path,
+                    err,
+                )
 
     @dbus_connected
     async def update(self, changed: dict[str, Any] | None = None) -> None:

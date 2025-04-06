@@ -1,4 +1,5 @@
 """Test the condition decorators."""
+
 import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import ANY, AsyncMock, Mock, PropertyMock, patch
@@ -25,7 +26,10 @@ from supervisor.jobs.job_group import JobGroup
 from supervisor.os.manager import OSManager
 from supervisor.plugins.audio import PluginAudio
 from supervisor.resolution.const import UnhealthyReason
+from supervisor.supervisor import Supervisor
 from supervisor.utils.dt import utcnow
+
+from tests.common import reset_last_call
 
 
 async def test_healthy(coresys: CoreSys, caplog: pytest.LogCaptureFixture):
@@ -46,7 +50,7 @@ async def test_healthy(coresys: CoreSys, caplog: pytest.LogCaptureFixture):
     test = TestClass(coresys)
     assert await test.execute()
 
-    coresys.resolution.unhealthy = UnhealthyReason.DOCKER
+    coresys.resolution.add_unhealthy_reason(UnhealthyReason.DOCKER)
     assert not await test.execute()
     assert "blocked from execution, system is not healthy - docker" in caplog.text
 
@@ -71,7 +75,8 @@ async def test_internet(
     system_result: bool | None,
 ):
     """Test the internet decorator."""
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
+    reset_last_call(Supervisor.check_connectivity)
 
     class TestClass:
         """Test class."""
@@ -101,10 +106,11 @@ async def test_internet(
     mock_websession = AsyncMock()
     mock_websession.head.side_effect = head_side_effect
     coresys.supervisor.connectivity = None
-    with patch(
-        "supervisor.utils.dbus.DBus.call_dbus", return_value=connectivity
-    ), patch.object(
-        CoreSys, "websession", new=PropertyMock(return_value=mock_websession)
+    with (
+        patch("supervisor.utils.dbus.DBus.call_dbus", return_value=connectivity),
+        patch.object(
+            CoreSys, "websession", new=PropertyMock(return_value=mock_websession)
+        ),
     ):
         assert await test.execute_host() is host_result
         assert await test.execute_system() is system_result
@@ -235,10 +241,10 @@ async def test_running(coresys: CoreSys):
 
     test = TestClass(coresys)
 
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     assert await test.execute()
 
-    coresys.core.state = CoreState.FREEZE
+    await coresys.core.set_state(CoreState.FREEZE)
     assert not await test.execute()
 
     coresys.jobs.ignore_conditions = [JobCondition.RUNNING]
@@ -266,10 +272,10 @@ async def test_exception_conditions(coresys: CoreSys):
 
     test = TestClass(coresys)
 
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     assert await test.execute()
 
-    coresys.core.state = CoreState.FREEZE
+    await coresys.core.set_state(CoreState.FREEZE)
     with pytest.raises(HassioError):
         await test.execute()
 
@@ -502,10 +508,13 @@ async def test_plugins_updated(coresys: CoreSys):
     )
     assert await test.execute()
 
-    with patch.object(
-        PluginAudio, "need_update", new=PropertyMock(return_value=True)
-    ), patch.object(
-        PluginAudio, "update", side_effect=[AudioUpdateError, None, AudioUpdateError]
+    with (
+        patch.object(PluginAudio, "need_update", new=PropertyMock(return_value=True)),
+        patch.object(
+            PluginAudio,
+            "update",
+            side_effect=[AudioUpdateError, None, AudioUpdateError],
+        ),
     ):
         assert not await test.execute()
         assert await test.execute()
@@ -942,7 +951,7 @@ async def test_execution_limit_group_throttle_rate_limit(
     assert test2.call == 3
 
 
-async def test_internal_jobs_no_notify(coresys: CoreSys):
+async def test_internal_jobs_no_notify(coresys: CoreSys, ha_ws_client: AsyncMock):
     """Test internal jobs do not send any notifications."""
 
     class TestClass:
@@ -963,18 +972,15 @@ async def test_internal_jobs_no_notify(coresys: CoreSys):
             return True
 
     test1 = TestClass(coresys)
-    # pylint: disable-next=protected-access
-    client = coresys.homeassistant.websocket._client
-    client.async_send_command.reset_mock()
 
     await test1.execute_internal()
     await asyncio.sleep(0)
-    client.async_send_command.assert_not_called()
+    ha_ws_client.async_send_command.assert_not_called()
 
     await test1.execute_default()
     await asyncio.sleep(0)
-    assert client.async_send_command.call_count == 2
-    client.async_send_command.assert_called_with(
+    assert ha_ws_client.async_send_command.call_count == 2
+    ha_ws_client.async_send_command.assert_called_with(
         {
             "type": "supervisor/event",
             "data": {
@@ -988,6 +994,7 @@ async def test_internal_jobs_no_notify(coresys: CoreSys):
                     "done": True,
                     "parent_id": None,
                     "errors": [],
+                    "created": ANY,
                 },
             },
         }
@@ -1134,13 +1141,13 @@ async def test_job_scheduled_delay(coresys: CoreSys):
     started = False
     ended = False
 
-    async def start_listener(job_id: str):
+    async def start_listener(evt_job: SupervisorJob):
         nonlocal started
-        started = started or job_id == job.uuid
+        started = started or evt_job.uuid == job.uuid
 
-    async def end_listener(job_id: str):
+    async def end_listener(evt_job: SupervisorJob):
         nonlocal ended
-        ended = ended or job_id == job.uuid
+        ended = ended or evt_job.uuid == job.uuid
 
     coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_START, start_listener)
     coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_END, end_listener)
@@ -1186,13 +1193,13 @@ async def test_job_scheduled_at(coresys: CoreSys):
     started = False
     ended = False
 
-    async def start_listener(job_id: str):
+    async def start_listener(evt_job: SupervisorJob):
         nonlocal started
-        started = started or job_id == job.uuid
+        started = started or evt_job.uuid == job.uuid
 
-    async def end_listener(job_id: str):
+    async def end_listener(evt_job: SupervisorJob):
         nonlocal ended
-        ended = ended or job_id == job.uuid
+        ended = ended or evt_job.uuid == job.uuid
 
     coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_START, start_listener)
     coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_END, end_listener)

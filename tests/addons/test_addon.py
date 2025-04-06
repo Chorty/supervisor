@@ -14,15 +14,18 @@ from securetar import SecureTarFile
 from supervisor.addons.addon import Addon
 from supervisor.addons.const import AddonBackupMode
 from supervisor.addons.model import AddonModel
-from supervisor.const import AddonState, BusEvent
+from supervisor.const import AddonBoot, AddonState, BusEvent
 from supervisor.coresys import CoreSys
 from supervisor.docker.addon import DockerAddon
 from supervisor.docker.const import ContainerState
 from supervisor.docker.monitor import DockerContainerStateEvent
 from supervisor.exceptions import AddonsError, AddonsJobError, AudioUpdateError
+from supervisor.hardware.helper import HwHelper
 from supervisor.ingress import Ingress
 from supervisor.store.repository import Repository
 from supervisor.utils.dt import utcnow
+
+from .test_manager import BOOT_FAIL_ISSUE, BOOT_FAIL_SUGGESTIONS
 
 from tests.common import get_fixture_path
 from tests.const import TEST_ADDON_SLUG
@@ -132,9 +135,11 @@ async def test_addon_watchdog(coresys: CoreSys, install_addon_ssh: Addon) -> Non
     install_addon_ssh.watchdog = True
     install_addon_ssh._manual_stop = False  # pylint: disable=protected-access
 
-    with patch.object(Addon, "restart") as restart, patch.object(
-        Addon, "start"
-    ) as start, patch.object(DockerAddon, "current_state") as current_state:
+    with (
+        patch.object(Addon, "restart") as restart,
+        patch.object(Addon, "start") as start,
+        patch.object(DockerAddon, "current_state") as current_state,
+    ):
         # Restart if it becomes unhealthy
         current_state.return_value = ContainerState.UNHEALTHY
         _fire_test_event(coresys, f"addon_{TEST_ADDON_SLUG}", ContainerState.UNHEALTHY)
@@ -177,11 +182,15 @@ async def test_watchdog_on_stop(coresys: CoreSys, install_addon_ssh: Addon) -> N
 
     install_addon_ssh.watchdog = True
 
-    with patch.object(Addon, "restart") as restart, patch.object(
-        DockerAddon,
-        "current_state",
-        return_value=ContainerState.STOPPED,
-    ), patch.object(DockerAddon, "stop"):
+    with (
+        patch.object(Addon, "restart") as restart,
+        patch.object(
+            DockerAddon,
+            "current_state",
+            return_value=ContainerState.STOPPED,
+        ),
+        patch.object(DockerAddon, "stop"),
+    ):
         # Do not restart when addon stopped by user
         _fire_test_event(coresys, f"addon_{TEST_ADDON_SLUG}", ContainerState.RUNNING)
         await asyncio.sleep(0)
@@ -205,14 +214,20 @@ async def test_listener_attached_on_install(
     coresys.hardware.disk.get_disk_free_space = lambda x: 5000
     container_collection = MagicMock()
     container_collection.get.side_effect = DockerException()
-    with patch(
-        "supervisor.docker.manager.DockerAPI.containers",
-        new=PropertyMock(return_value=container_collection),
-    ), patch("pathlib.Path.is_dir", return_value=True), patch(
-        "supervisor.addons.addon.Addon.need_build", new=PropertyMock(return_value=False)
-    ), patch(
-        "supervisor.addons.model.AddonModel.with_ingress",
-        new=PropertyMock(return_value=False),
+    with (
+        patch(
+            "supervisor.docker.manager.DockerAPI.containers",
+            new=PropertyMock(return_value=container_collection),
+        ),
+        patch("pathlib.Path.is_dir", return_value=True),
+        patch(
+            "supervisor.addons.addon.Addon.need_build",
+            new=PropertyMock(return_value=False),
+        ),
+        patch(
+            "supervisor.addons.model.AddonModel.with_ingress",
+            new=PropertyMock(return_value=False),
+        ),
     ):
         await coresys.addons.install(TEST_ADDON_SLUG)
 
@@ -232,18 +247,21 @@ async def test_watchdog_during_attach(
 ):
     """Test host reboot treated as manual stop but not supervisor restart."""
     store = coresys.addons.store[TEST_ADDON_SLUG]
-    coresys.addons.data.install(store)
+    await coresys.addons.data.install(store)
 
-    with patch.object(Addon, "restart") as restart, patch.object(
-        type(coresys.hardware.helper),
-        "last_boot",
-        new=PropertyMock(return_value=utcnow()),
-    ), patch.object(DockerAddon, "attach"), patch.object(
-        DockerAddon,
-        "current_state",
-        return_value=ContainerState.STOPPED,
+    with (
+        patch.object(Addon, "restart") as restart,
+        patch.object(HwHelper, "last_boot", return_value=utcnow()),
+        patch.object(DockerAddon, "attach"),
+        patch.object(
+            DockerAddon,
+            "current_state",
+            return_value=ContainerState.STOPPED,
+        ),
     ):
-        coresys.config.last_boot = coresys.hardware.helper.last_boot + boot_timedelta
+        coresys.config.last_boot = (
+            await coresys.hardware.helper.last_boot() + boot_timedelta
+        )
         addon = Addon(coresys, store.slug)
         coresys.addons.local[addon.slug] = addon
         addon.watchdog = True
@@ -269,10 +287,15 @@ async def test_install_update_fails_if_out_of_date(
         with pytest.raises(AddonsJobError):
             await coresys.addons.update(TEST_ADDON_SLUG)
 
-    with patch.object(
-        type(coresys.plugins.audio), "need_update", new=PropertyMock(return_value=True)
-    ), patch.object(
-        type(coresys.plugins.audio), "update", side_effect=AudioUpdateError
+    with (
+        patch.object(
+            type(coresys.plugins.audio),
+            "need_update",
+            new=PropertyMock(return_value=True),
+        ),
+        patch.object(
+            type(coresys.plugins.audio), "update", side_effect=AudioUpdateError
+        ),
     ):
         with pytest.raises(AddonsJobError):
             await coresys.addons.install(TEST_ADDON_SLUG)
@@ -437,9 +460,12 @@ async def test_backup_with_pre_post_command(
     await install_addon_ssh.load()
 
     tarfile = SecureTarFile(coresys.config.path_tmp / "test.tar.gz", "w")
-    with patch.object(
-        Addon, "backup_pre", new=PropertyMock(return_value="backup_pre")
-    ), patch.object(Addon, "backup_post", new=PropertyMock(return_value="backup_post")):
+    with (
+        patch.object(Addon, "backup_pre", new=PropertyMock(return_value="backup_pre")),
+        patch.object(
+            Addon, "backup_post", new=PropertyMock(return_value="backup_post")
+        ),
+    ):
         assert await install_addon_ssh.backup(tarfile) is None
 
     assert container.exec_run.call_count == 2
@@ -478,9 +504,11 @@ async def test_backup_with_pre_command_error(
     await install_addon_ssh.load()
 
     tarfile = SecureTarFile(coresys.config.path_tmp / "test.tar.gz", "w")
-    with patch.object(DockerAddon, "is_running", return_value=True), patch.object(
-        Addon, "backup_pre", new=PropertyMock(return_value="backup_pre")
-    ), pytest.raises(AddonsError):
+    with (
+        patch.object(DockerAddon, "is_running", return_value=True),
+        patch.object(Addon, "backup_pre", new=PropertyMock(return_value="backup_pre")),
+        pytest.raises(AddonsError),
+    ):
         assert await install_addon_ssh.backup(tarfile) is None
 
     assert not tarfile.path.exists()
@@ -501,10 +529,15 @@ async def test_backup_cold_mode(
     await install_addon_ssh.load()
 
     tarfile = SecureTarFile(coresys.config.path_tmp / "test.tar.gz", "w")
-    with patch.object(
-        AddonModel, "backup_mode", new=PropertyMock(return_value=AddonBackupMode.COLD)
-    ), patch.object(
-        DockerAddon, "is_running", side_effect=[status == "running", False, False]
+    with (
+        patch.object(
+            AddonModel,
+            "backup_mode",
+            new=PropertyMock(return_value=AddonBackupMode.COLD),
+        ),
+        patch.object(
+            DockerAddon, "is_running", side_effect=[status == "running", False, False]
+        ),
     ):
         start_task = await install_addon_ssh.backup(tarfile)
 
@@ -532,14 +565,16 @@ async def test_backup_cold_mode_with_watchdog(
     # Patching out the normal end of backup process leaves the container in a stopped state
     # Watchdog should still not try to restart it though, it should remain this way
     tarfile = SecureTarFile(coresys.config.path_tmp / "test.tar.gz", "w")
-    with patch.object(Addon, "start") as start, patch.object(
-        Addon, "restart"
-    ) as restart, patch.object(Addon, "end_backup"), patch.object(
-        DockerAddon, "stop", new=mock_stop
-    ), patch.object(
-        AddonModel,
-        "backup_mode",
-        new=PropertyMock(return_value=AddonBackupMode.COLD),
+    with (
+        patch.object(Addon, "start") as start,
+        patch.object(Addon, "restart") as restart,
+        patch.object(Addon, "end_backup"),
+        patch.object(DockerAddon, "stop", new=mock_stop),
+        patch.object(
+            AddonModel,
+            "backup_mode",
+            new=PropertyMock(return_value=AddonBackupMode.COLD),
+        ),
     ):
         await install_addon_ssh.backup(tarfile)
         await asyncio.sleep(0)
@@ -584,8 +619,9 @@ async def test_restore_while_running(
     await install_addon_ssh.load()
 
     tarfile = SecureTarFile(get_fixture_path("backup_local_ssh_stopped.tar.gz"), "r")
-    with patch.object(DockerAddon, "is_running", return_value=True), patch.object(
-        Ingress, "update_hass_panel"
+    with (
+        patch.object(DockerAddon, "is_running", return_value=True),
+        patch.object(Ingress, "update_hass_panel"),
     ):
         start_task = await coresys.addons.restore(TEST_ADDON_SLUG, tarfile)
 
@@ -616,10 +652,11 @@ async def test_restore_while_running_with_watchdog(
     # We restore a stopped backup so restore will not restart it
     # Watchdog will see it stop and should not attempt reanimation either
     tarfile = SecureTarFile(get_fixture_path("backup_local_ssh_stopped.tar.gz"), "r")
-    with patch.object(Addon, "start") as start, patch.object(
-        Addon, "restart"
-    ) as restart, patch.object(DockerAddon, "stop", new=mock_stop), patch.object(
-        Ingress, "update_hass_panel"
+    with (
+        patch.object(Addon, "start") as start,
+        patch.object(Addon, "restart") as restart,
+        patch.object(DockerAddon, "stop", new=mock_stop),
+        patch.object(Ingress, "update_hass_panel"),
     ):
         await coresys.addons.restore(TEST_ADDON_SLUG, tarfile)
         await asyncio.sleep(0)
@@ -655,6 +692,7 @@ async def test_local_example_install(
     mock_aarch64_arch_supported: None,
 ):
     """Test install of an addon."""
+    coresys.hardware.disk.get_disk_free_space = lambda x: 5000
     assert not (
         data_dir := tmp_supervisor_data / "addons" / "data" / "local_example"
     ).exists()
@@ -700,7 +738,7 @@ async def test_local_example_ingress_port_set(
     assert install_addon_example.ingress_port != 0
 
 
-def test_addon_pulse_error(
+async def test_addon_pulse_error(
     coresys: CoreSys,
     install_addon_example: Addon,
     caplog: pytest.LogCaptureFixture,
@@ -711,14 +749,14 @@ def test_addon_pulse_error(
         "supervisor.addons.addon.Path.write_text", side_effect=(err := OSError())
     ):
         err.errno = errno.EBUSY
-        install_addon_example.write_pulse()
+        await install_addon_example.write_pulse()
 
         assert "can't write pulse/client.config" in caplog.text
         assert coresys.core.healthy is True
 
         caplog.clear()
         err.errno = errno.EBADMSG
-        install_addon_example.write_pulse()
+        await install_addon_example.write_pulse()
 
         assert "can't write pulse/client.config" in caplog.text
         assert coresys.core.healthy is False
@@ -847,3 +885,43 @@ async def test_addon_load_succeeds_with_docker_errors(
     caplog.clear()
     await install_addon_ssh.load()
     assert "Unknown error with test/amd64-addon-ssh:9.2.1" in caplog.text
+
+
+async def test_addon_manual_only_boot(coresys: CoreSys, install_addon_example: Addon):
+    """Test an addon with manual only boot mode."""
+    assert install_addon_example.boot_config == "manual_only"
+    assert install_addon_example.boot == "manual"
+
+    # Users cannot change boot mode of an addon with manual forced so changing boot isn't realistic
+    # However boot mode can change on update and user may have set auto before, ensure it is ignored
+    install_addon_example.boot = "auto"
+    assert install_addon_example.boot == "manual"
+
+
+async def test_addon_start_dismisses_boot_fail(
+    coresys: CoreSys, install_addon_ssh: Addon
+):
+    """Test a successful start dismisses the boot fail issue."""
+    install_addon_ssh.state = AddonState.ERROR
+    coresys.resolution.add_issue(
+        BOOT_FAIL_ISSUE, [suggestion.type for suggestion in BOOT_FAIL_SUGGESTIONS]
+    )
+
+    install_addon_ssh.state = AddonState.STARTED
+    assert coresys.resolution.issues == []
+    assert coresys.resolution.suggestions == []
+
+
+async def test_addon_disable_boot_dismisses_boot_fail(
+    coresys: CoreSys, install_addon_ssh: Addon
+):
+    """Test a disabling boot dismisses the boot fail issue."""
+    install_addon_ssh.boot = AddonBoot.AUTO
+    install_addon_ssh.state = AddonState.ERROR
+    coresys.resolution.add_issue(
+        BOOT_FAIL_ISSUE, [suggestion.type for suggestion in BOOT_FAIL_SUGGESTIONS]
+    )
+
+    install_addon_ssh.boot = AddonBoot.MANUAL
+    assert coresys.resolution.issues == []
+    assert coresys.resolution.suggestions == []

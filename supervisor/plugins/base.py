@@ -1,4 +1,5 @@
 """Supervisor plugins base class."""
+
 from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import Awaitable
@@ -14,7 +15,7 @@ from ..docker.interface import DockerInterface
 from ..docker.monitor import DockerContainerStateEvent
 from ..exceptions import DockerError, PluginError
 from ..utils.common import FileConfiguration
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .const import WATCHDOG_MAX_ATTEMPTS, WATCHDOG_RETRY_SECONDS
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -128,7 +129,7 @@ class PluginBase(ABC, FileConfiguration, CoreSysAttributes):
                 except PluginError as err:
                     attempts = attempts + 1
                     _LOGGER.error("Watchdog restart of %s plugin failed!", self.slug)
-                    capture_exception(err)
+                    await async_capture_exception(err)
                 else:
                     break
 
@@ -178,7 +179,7 @@ class PluginBase(ABC, FileConfiguration, CoreSysAttributes):
         else:
             self.version = self.instance.version
             self.image = self.default_image
-            self.save_data()
+            await self.save_data()
 
         # Run plugin
         with suppress(PluginError):
@@ -207,7 +208,7 @@ class PluginBase(ABC, FileConfiguration, CoreSysAttributes):
         _LOGGER.info("%s plugin now installed", self.slug)
         self.version = self.instance.version
         self.image = self.default_image
-        self.save_data()
+        await self.save_data()
 
     async def update(self, version: str | None = None) -> None:
         """Update system plugin."""
@@ -223,7 +224,7 @@ class PluginBase(ABC, FileConfiguration, CoreSysAttributes):
         await self.instance.update(version, image=self.default_image)
         self.version = self.instance.version
         self.image = self.default_image
-        self.save_data()
+        await self.save_data()
 
         # Cleanup
         with suppress(DockerError):

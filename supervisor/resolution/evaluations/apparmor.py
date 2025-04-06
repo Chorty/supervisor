@@ -1,4 +1,5 @@
 """Evaluation class for AppArmor."""
+
 from pathlib import Path
 
 from ...const import CoreState
@@ -35,6 +36,9 @@ class EvaluateAppArmor(EvaluateBase):
     async def evaluate(self) -> None:
         """Run evaluation."""
         try:
-            return _APPARMOR_KERNEL.read_text(encoding="utf-8").strip().upper() != "Y"
+            apparmor = await self.sys_run_in_executor(
+                _APPARMOR_KERNEL.read_text, encoding="utf-8"
+            )
         except OSError:
             return True
+        return apparmor.strip().upper() != "Y"

@@ -1,4 +1,5 @@
 """Test connectivity check evaluation."""
+
 from unittest.mock import PropertyMock, patch
 
 from supervisor.const import CoreState
@@ -11,7 +12,7 @@ from supervisor.resolution.evaluations.connectivity_check import (
 async def test_evaluation(coresys: CoreSys):
     """Test evaluation."""
     connectivity_check = EvaluateConnectivityCheck(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     assert connectivity_check.reason not in coresys.resolution.unsupported
 
@@ -45,13 +46,13 @@ async def test_did_run(coresys: CoreSys):
         return_value=False,
     ) as evaluate:
         for state in should_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await connectivity_check()
             evaluate.assert_called_once()
             evaluate.reset_mock()
 
         for state in should_not_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await connectivity_check()
             evaluate.assert_not_called()
             evaluate.reset_mock()

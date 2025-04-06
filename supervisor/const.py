@@ -1,4 +1,5 @@
 """Constants file for Supervisor."""
+
 from dataclasses import dataclass
 from enum import StrEnum
 from ipaddress import ip_network
@@ -8,7 +9,7 @@ from typing import Self
 
 from aiohttp import __version__ as aiohttpversion
 
-SUPERVISOR_VERSION = "99.9.9dev"
+SUPERVISOR_VERSION = "9999.09.9.dev9999"
 SERVER_SOFTWARE = f"HomeAssistantSupervisor/{SUPERVISOR_VERSION} aiohttp/{aiohttpversion} Python/{systemversion[0]}.{systemversion[1]}"
 
 URL_HASSIO_ADDONS = "https://github.com/home-assistant/addons"
@@ -151,6 +152,7 @@ ATTR_DEFAULT = "default"
 ATTR_DEPLOYMENT = "deployment"
 ATTR_DESCRIPTON = "description"
 ATTR_DETACHED = "detached"
+ATTR_DETECT_BLOCKING_IO = "detect_blocking_io"
 ATTR_DEVICES = "devices"
 ATTR_DEVICETREE = "devicetree"
 ATTR_DIAGNOSTICS = "diagnostics"
@@ -172,6 +174,7 @@ ATTR_ENABLED = "enabled"
 ATTR_ENVIRONMENT = "environment"
 ATTR_EVENT = "event"
 ATTR_EXCLUDE_DATABASE = "exclude_database"
+ATTR_EXTRA = "extra"
 ATTR_FEATURES = "features"
 ATTR_FILENAME = "filename"
 ATTR_FLAGS = "flags"
@@ -219,6 +222,7 @@ ATTR_IP_ADDRESS = "ip_address"
 ATTR_IPV4 = "ipv4"
 ATTR_IPV6 = "ipv6"
 ATTR_ISSUES = "issues"
+ATTR_JOB_ID = "job_id"
 ATTR_JOURNALD = "journald"
 ATTR_KERNEL = "kernel"
 ATTR_KERNEL_MODULES = "kernel_modules"
@@ -226,7 +230,7 @@ ATTR_LABELS = "labels"
 ATTR_LAST_BOOT = "last_boot"
 ATTR_LEGACY = "legacy"
 ATTR_LOCALS = "locals"
-ATTR_LOCATON = "location"
+ATTR_LOCATION = "location"
 ATTR_LOGGING = "logging"
 ATTR_LOGO = "logo"
 ATTR_LONG_DESCRIPTION = "long_description"
@@ -258,6 +262,7 @@ ATTR_PANEL_TITLE = "panel_title"
 ATTR_PANELS = "panels"
 ATTR_PARENT = "parent"
 ATTR_PASSWORD = "password"
+ATTR_PATH = "path"
 ATTR_PLUGINS = "plugins"
 ATTR_PORT = "port"
 ATTR_PORTS = "ports"
@@ -291,6 +296,7 @@ ATTR_SESSION_DATA_USER = "user"
 ATTR_SESSION_DATA_USER_ID = "user_id"
 ATTR_SIGNAL = "signal"
 ATTR_SIZE = "size"
+ATTR_SIZE_BYTES = "size_bytes"
 ATTR_SLUG = "slug"
 ATTR_SOURCE = "source"
 ATTR_SQUASH = "squash"
@@ -308,7 +314,11 @@ ATTR_SUPERVISOR_INTERNET = "supervisor_internet"
 ATTR_SUPERVISOR_VERSION = "supervisor_version"
 ATTR_SUPPORTED = "supported"
 ATTR_SUPPORTED_ARCH = "supported_arch"
+ATTR_SWAP_SIZE = "swap_size"
+ATTR_SWAPPINESS = "swappiness"
 ATTR_SYSTEM = "system"
+ATTR_SYSTEM_MANAGED = "system_managed"
+ATTR_SYSTEM_MANAGED_CONFIG_ENTRY = "system_managed_config_entry"
 ATTR_TIMEOUT = "timeout"
 ATTR_TIMEZONE = "timezone"
 ATTR_TITLE = "title"
@@ -379,11 +389,26 @@ ROLE_ADMIN = "admin"
 ROLE_ALL = [ROLE_DEFAULT, ROLE_HOMEASSISTANT, ROLE_BACKUP, ROLE_MANAGER, ROLE_ADMIN]
 
 
+class AddonBootConfig(StrEnum):
+    """Boot mode config for the add-on."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+    MANUAL_ONLY = "manual_only"
+
+
 class AddonBoot(StrEnum):
     """Boot mode for the add-on."""
 
     AUTO = "auto"
     MANUAL = "manual"
+
+    @classmethod
+    def _missing_(cls, value: str) -> Self | None:
+        """Convert 'forced' config values to their counterpart."""
+        if value == AddonBootConfig.MANUAL_ONLY:
+            return AddonBoot.MANUAL
+        return None
 
 
 class AddonStartup(StrEnum):
@@ -463,6 +488,7 @@ class BusEvent(StrEnum):
     DOCKER_CONTAINER_STATE_CHANGE = "docker_container_state_change"
     HARDWARE_NEW_DEVICE = "hardware_new_device"
     HARDWARE_REMOVE_DEVICE = "hardware_remove_device"
+    SUPERVISOR_CONNECTIVITY_CHANGE = "supervisor_connectivity_change"
     SUPERVISOR_JOB_END = "supervisor_job_end"
     SUPERVISOR_JOB_START = "supervisor_job_start"
     SUPERVISOR_STATE_CHANGE = "supervisor_state_change"

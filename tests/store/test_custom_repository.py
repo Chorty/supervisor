@@ -1,4 +1,5 @@
 """Test add custom repository."""
+
 import json
 from unittest.mock import PropertyMock, patch
 
@@ -25,10 +26,14 @@ async def test_add_valid_repository(
 ):
     """Test add custom repository."""
     current = coresys.store.repository_urls
-    with patch("supervisor.store.repository.Repository.load", return_value=None), patch(
-        "supervisor.utils.common.read_yaml_file",
-        return_value={"name": "Awesome repository"},
-    ), patch("pathlib.Path.exists", return_value=True):
+    with (
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch(
+            "supervisor.utils.common.read_yaml_file",
+            return_value={"name": "Awesome repository"},
+        ),
+        patch("pathlib.Path.exists", return_value=True),
+    ):
         if use_update:
             await store_manager.update_repositories(current + ["http://example.com"])
         else:
@@ -42,15 +47,20 @@ async def test_add_valid_repository(
 async def test_add_invalid_repository(coresys: CoreSys, store_manager: StoreManager):
     """Test add invalid custom repository."""
     current = coresys.store.repository_urls
-    with patch("supervisor.store.repository.Repository.load", return_value=None), patch(
-        "pathlib.Path.read_text",
-        return_value="",
+    with (
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch(
+            "pathlib.Path.read_text",
+            return_value="",
+        ),
     ):
         await store_manager.update_repositories(
             current + ["http://example.com"], add_with_errors=True
         )
 
-        assert not store_manager.get_from_url("http://example.com").validate()
+        assert not await coresys.run_in_executor(
+            store_manager.get_from_url("http://example.com").validate
+        )
 
     assert "http://example.com" in coresys.store.repository_urls
     assert coresys.resolution.suggestions[-1].type == SuggestionType.EXECUTE_REMOVE
@@ -62,10 +72,14 @@ async def test_error_on_invalid_repository(
 ):
     """Test invalid repository not added."""
     current = coresys.store.repository_urls
-    with patch("supervisor.store.repository.Repository.load", return_value=None), patch(
-        "pathlib.Path.read_text",
-        return_value="",
-    ), pytest.raises(StoreError):
+    with (
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch(
+            "pathlib.Path.read_text",
+            return_value="",
+        ),
+        pytest.raises(StoreError),
+    ):
         if use_update:
             await store_manager.update_repositories(current + ["http://example.com"])
         else:
@@ -82,10 +96,14 @@ async def test_add_invalid_repository_file(
 ):
     """Test add invalid custom repository file."""
     current = coresys.store.repository_urls
-    with patch("supervisor.store.repository.Repository.load", return_value=None), patch(
-        "pathlib.Path.read_text",
-        return_value=json.dumps({"name": "Awesome repository"}),
-    ), patch("pathlib.Path.exists", return_value=False):
+    with (
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch(
+            "pathlib.Path.read_text",
+            return_value=json.dumps({"name": "Awesome repository"}),
+        ),
+        patch("pathlib.Path.exists", return_value=False),
+    ):
         await store_manager.update_repositories(
             current + ["http://example.com"], add_with_errors=True
         )
@@ -138,9 +156,10 @@ async def test_error_on_repository_with_git_error(
 ):
     """Test repo not added on git error."""
     current = coresys.store.repository_urls
-    with patch(
-        "supervisor.store.repository.Repository.load", side_effect=git_error
-    ), pytest.raises(StoreError):
+    with (
+        patch("supervisor.store.repository.Repository.load", side_effect=git_error),
+        pytest.raises(StoreError),
+    ):
         if use_update:
             await store_manager.update_repositories(current + ["http://example.com"])
         else:
@@ -159,10 +178,15 @@ async def test_preinstall_valid_repository(
     """Test add core repository valid."""
     with patch("supervisor.store.repository.Repository.load", return_value=None):
         await store_manager.update_repositories(BUILTIN_REPOSITORIES)
-        assert store_manager.get("core").validate()
-        assert store_manager.get("local").validate()
-        assert store_manager.get("a0d7b954").validate()
-        assert store_manager.get("5c53de3b").validate()
+
+        def validate():
+            assert store_manager.get("core").validate()
+            assert store_manager.get("local").validate()
+            assert store_manager.get("a0d7b954").validate()
+            assert store_manager.get("5c53de3b").validate()
+            assert store_manager.get("d5369777").validate()
+
+        await coresys.run_in_executor(validate)
 
 
 @pytest.mark.parametrize("use_update", [True, False])
@@ -194,7 +218,7 @@ async def test_remove_used_repository(
     use_update: bool,
 ):
     """Test removing used custom repository."""
-    coresys.addons.data.install(store_addon)
+    await coresys.addons.data.install(store_addon)
     addon = Addon(coresys, store_addon.slug)
     coresys.addons.local[addon.slug] = addon
 
@@ -224,10 +248,13 @@ async def test_update_partial_error(coresys: CoreSys, store_manager: StoreManage
         current = coresys.store.repository_urls
         initial = len(current)
 
-        with patch(
-            "supervisor.store.repository.Repository.load",
-            side_effect=[None, StoreGitError()],
-        ), pytest.raises(StoreError):
+        with (
+            patch(
+                "supervisor.store.repository.Repository.load",
+                side_effect=[None, StoreGitError()],
+            ),
+            pytest.raises(StoreError),
+        ):
             await store_manager.update_repositories(
                 current + ["http://example.com", "http://example2.com"]
             )
@@ -241,11 +268,11 @@ async def test_error_adding_duplicate(
 ):
     """Test adding a duplicate repository causes an error."""
     assert repository.source in coresys.store.repository_urls
-    with patch(
-        "supervisor.store.repository.Repository.validate", return_value=True
-    ), patch(
-        "supervisor.store.repository.Repository.load", return_value=None
-    ), pytest.raises(StoreError):
+    with (
+        patch("supervisor.store.repository.Repository.validate", return_value=True),
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        pytest.raises(StoreError),
+    ):
         await store_manager.add_repository(repository.source)
 
 
@@ -256,10 +283,14 @@ async def test_add_with_update_repositories(
     assert repository.source in coresys.store.repository_urls
     assert "http://example.com" not in coresys.store.repository_urls
 
-    with patch("supervisor.store.repository.Repository.load", return_value=None), patch(
-        "supervisor.utils.common.read_yaml_file",
-        return_value={"name": "Awesome repository"},
-    ), patch("pathlib.Path.exists", return_value=True):
+    with (
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch(
+            "supervisor.utils.common.read_yaml_file",
+            return_value={"name": "Awesome repository"},
+        ),
+        patch("pathlib.Path.exists", return_value=True),
+    ):
         await store_manager.update_repositories(["http://example.com"], replace=False)
 
     assert repository.source in coresys.store.repository_urls
@@ -271,9 +302,12 @@ async def test_add_repository_fails_if_out_of_date(
     coresys: CoreSys, store_manager: StoreManager, use_update: bool
 ):
     """Test adding a repository fails when supervisor not updated."""
-    with patch.object(
-        type(coresys.supervisor), "need_update", new=PropertyMock(return_value=True)
-    ), pytest.raises(StoreJobError):
+    with (
+        patch.object(
+            type(coresys.supervisor), "need_update", new=PropertyMock(return_value=True)
+        ),
+        pytest.raises(StoreJobError),
+    ):
         if use_update:
             await store_manager.update_repositories(
                 coresys.store.repository_urls + ["http://example.com"],
@@ -287,12 +321,13 @@ async def test_repositories_loaded_ignore_updates(
     coresys: CoreSys, store_manager: StoreManager, need_update: bool
 ):
     """Test repositories loaded whether or not supervisor needs an update."""
-    with patch(
-        "supervisor.store.repository.Repository.load", return_value=None
-    ), patch.object(
-        type(coresys.supervisor),
-        "need_update",
-        new=PropertyMock(return_value=need_update),
+    with (
+        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch.object(
+            type(coresys.supervisor),
+            "need_update",
+            new=PropertyMock(return_value=need_update),
+        ),
     ):
         await store_manager.load()
 

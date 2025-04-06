@@ -1,18 +1,25 @@
 """A collection of tasks."""
+
 import asyncio
 from collections.abc import Awaitable
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
 from ..addons.const import ADDON_UPDATE_CONDITIONS
+from ..backups.const import LOCATION_CLOUD_BACKUP
 from ..const import AddonState
 from ..coresys import CoreSysAttributes
-from ..exceptions import AddonsError, HomeAssistantError, ObserverError
+from ..exceptions import (
+    AddonsError,
+    BackupFileNotFoundError,
+    HomeAssistantError,
+    ObserverError,
+)
 from ..homeassistant.const import LANDINGPAGE
-from ..jobs.decorator import Job, JobCondition
+from ..jobs.decorator import Job, JobCondition, JobExecutionLimit
 from ..plugins.const import PLUGIN_UPDATE_CONDITIONS
 from ..utils.dt import utcnow
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -32,7 +39,7 @@ RUN_UPDATE_OBSERVER = 30400
 RUN_RELOAD_ADDONS = 10800
 RUN_RELOAD_BACKUPS = 72000
 RUN_RELOAD_HOST = 7600
-RUN_RELOAD_UPDATER = 7200
+RUN_RELOAD_UPDATER = 27100
 RUN_RELOAD_INGRESS = 930
 RUN_RELOAD_MOUNTS = 900
 
@@ -41,7 +48,11 @@ RUN_WATCHDOG_HOMEASSISTANT_API = 120
 RUN_WATCHDOG_ADDON_APPLICATON = 120
 RUN_WATCHDOG_OBSERVER_APPLICATION = 180
 
+RUN_CORE_BACKUP_CLEANUP = 86200
+
 PLUGIN_AUTO_UPDATE_CONDITIONS = PLUGIN_UPDATE_CONDITIONS + [JobCondition.RUNNING]
+
+OLD_BACKUP_THRESHOLD = timedelta(days=2)
 
 
 class Tasks(CoreSysAttributes):
@@ -65,7 +76,7 @@ class Tasks(CoreSysAttributes):
 
         # Reload
         self.sys_scheduler.register_task(self._reload_store, RUN_RELOAD_ADDONS)
-        self.sys_scheduler.register_task(self.sys_updater.reload, RUN_RELOAD_UPDATER)
+        self.sys_scheduler.register_task(self._reload_updater, RUN_RELOAD_UPDATER)
         self.sys_scheduler.register_task(self.sys_backups.reload, RUN_RELOAD_BACKUPS)
         self.sys_scheduler.register_task(self.sys_host.reload, RUN_RELOAD_HOST)
         self.sys_scheduler.register_task(self.sys_ingress.reload, RUN_RELOAD_INGRESS)
@@ -80,6 +91,11 @@ class Tasks(CoreSysAttributes):
         )
         self.sys_scheduler.register_task(
             self._watchdog_addon_application, RUN_WATCHDOG_ADDON_APPLICATON
+        )
+
+        # Cleanup
+        self.sys_scheduler.register_task(
+            self._core_backup_cleanup, RUN_CORE_BACKUP_CLEANUP
         )
 
         _LOGGER.info("All core tasks are scheduled")
@@ -135,6 +151,7 @@ class Tasks(CoreSysAttributes):
             JobCondition.INTERNET_HOST,
             JobCondition.RUNNING,
         ],
+        limit=JobExecutionLimit.ONCE,
     )
     async def _update_supervisor(self):
         """Check and run update of Supervisor Supervisor."""
@@ -174,17 +191,6 @@ class Tasks(CoreSysAttributes):
             self._cache[HASS_WATCHDOG_API_FAILURES] = 0
             return
 
-        # Give up after 5 reanimation failures in a row. Supervisor cannot fix this issue.
-        reanimate_fails = self._cache.get(HASS_WATCHDOG_REANIMATE_FAILURES, 0)
-        if reanimate_fails >= HASS_WATCHDOG_MAX_REANIMATE_ATTEMPTS:
-            if reanimate_fails == HASS_WATCHDOG_MAX_REANIMATE_ATTEMPTS:
-                _LOGGER.critical(
-                    "Watchdog cannot reanimate Home Assistant Core, failed all %s attempts.",
-                    reanimate_fails,
-                )
-                self._cache[HASS_WATCHDOG_REANIMATE_FAILURES] += 1
-            return
-
         # Init cache data
         api_fails = self._cache.get(HASS_WATCHDOG_API_FAILURES, 0)
 
@@ -195,16 +201,38 @@ class Tasks(CoreSysAttributes):
             _LOGGER.warning("Watchdog missed an Home Assistant Core API response.")
             return
 
-        _LOGGER.error(
-            "Watchdog missed %s Home Assistant Core API responses in a row. Restarting Home Assistant Core API!",
-            HASS_WATCHDOG_MAX_API_ATTEMPTS,
-        )
+        # After 5 reanimation attempts switch to safe mode. If that fails, give up
+        reanimate_fails = self._cache.get(HASS_WATCHDOG_REANIMATE_FAILURES, 0)
+        if reanimate_fails > HASS_WATCHDOG_MAX_REANIMATE_ATTEMPTS:
+            return
+
+        if safe_mode := reanimate_fails == HASS_WATCHDOG_MAX_REANIMATE_ATTEMPTS:
+            _LOGGER.critical(
+                "Watchdog cannot reanimate Home Assistant Core, failed all %s attempts. Restarting into safe mode",
+                reanimate_fails,
+            )
+        else:
+            _LOGGER.error(
+                "Watchdog missed %s Home Assistant Core API responses in a row. Restarting Home Assistant Core!",
+                HASS_WATCHDOG_MAX_API_ATTEMPTS,
+            )
+
         try:
-            await self.sys_homeassistant.core.restart()
+            if safe_mode:
+                await self.sys_homeassistant.core.rebuild(safe_mode=True)
+            else:
+                await self.sys_homeassistant.core.restart()
         except HomeAssistantError as err:
-            _LOGGER.error("Home Assistant watchdog reanimation failed!")
-            if reanimate_fails == 0:
-                capture_exception(err)
+            if reanimate_fails == 0 or safe_mode:
+                await async_capture_exception(err)
+
+            if safe_mode:
+                _LOGGER.critical(
+                    "Safe mode restart failed. Watchdog cannot bring Home Assistant online."
+                )
+            else:
+                _LOGGER.error("Home Assistant watchdog reanimation failed!")
+
             self._cache[HASS_WATCHDOG_REANIMATE_FAILURES] = reanimate_fails + 1
         else:
             self._cache[HASS_WATCHDOG_REANIMATE_FAILURES] = 0
@@ -313,7 +341,7 @@ class Tasks(CoreSysAttributes):
                 await (await addon.restart())
             except AddonsError as err:
                 _LOGGER.error("%s watchdog reanimation failed with %s", addon.slug, err)
-                capture_exception(err)
+                await async_capture_exception(err)
             finally:
                 self._cache[addon.slug] = 0
 
@@ -321,3 +349,27 @@ class Tasks(CoreSysAttributes):
     async def _reload_store(self) -> None:
         """Reload store and check for addon updates."""
         await self.sys_store.reload()
+
+    @Job(name="tasks_reload_updater")
+    async def _reload_updater(self) -> None:
+        """Check for new versions of Home Assistant, Supervisor, OS, etc."""
+        await self.sys_updater.reload()
+
+        # If there's a new version of supervisor, start update immediately
+        if self.sys_supervisor.need_update:
+            await self._update_supervisor()
+
+    @Job(name="tasks_core_backup_cleanup", conditions=[JobCondition.HEALTHY])
+    async def _core_backup_cleanup(self) -> None:
+        """Core backup is intended for transient use, remove any old backups that got left behind."""
+        old_backups = [
+            backup
+            for backup in self.sys_backups.list_backups
+            if LOCATION_CLOUD_BACKUP in backup.all_locations
+            and datetime.fromisoformat(backup.date) < utcnow() - OLD_BACKUP_THRESHOLD
+        ]
+        for backup in old_backups:
+            try:
+                await self.sys_backups.remove(backup, [LOCATION_CLOUD_BACKUP])
+            except BackupFileNotFoundError as err:
+                _LOGGER.debug("Can't remove backup %s: %s", backup.slug, err)

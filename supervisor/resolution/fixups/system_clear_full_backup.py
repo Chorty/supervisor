@@ -1,5 +1,8 @@
 """Helpers to check and fix issues with free space."""
+
 import logging
+
+from supervisor.exceptions import BackupFileNotFoundError
 
 from ...backups.const import BackupType
 from ...coresys import CoreSys
@@ -30,7 +33,10 @@ class FixupSystemClearFullBackup(FixupBase):
         for backup in sorted(full_backups, key=lambda x: x.date)[
             : -1 * MINIMUM_FULL_BACKUPS
         ]:
-            self.sys_backups.remove(backup)
+            try:
+                await self.sys_backups.remove(backup)
+            except BackupFileNotFoundError as err:
+                _LOGGER.debug("Can't remove backup %s: %s", backup.slug, err)
 
     @property
     def suggestion(self) -> SuggestionType:

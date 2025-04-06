@@ -1,4 +1,5 @@
 """D-Bus interface for hostname."""
+
 import logging
 
 from dbus_fast.aio.message_bus import MessageBus
@@ -83,4 +84,4 @@ class Hostname(DBusInterfaceProxy):
     @dbus_connected
     async def set_static_hostname(self, hostname: str) -> None:
         """Change local hostname."""
-        await self.dbus.call_set_static_hostname(hostname, False)
+        await self.connected_dbus.call("set_static_hostname", hostname, False)

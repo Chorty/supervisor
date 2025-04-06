@@ -1,4 +1,5 @@
 """Test check DNS Servers for IPv6 errors."""
+
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from aiodns.error import DNSError
@@ -30,7 +31,7 @@ async def test_base(coresys: CoreSys):
 async def test_check(coresys: CoreSys, dns_query: AsyncMock, capture_exception: Mock):
     """Test check for DNS server IPv6 errors."""
     dns_server_ipv6 = CheckDNSServerIPv6(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     coresys.plugins.dns.servers = ["dns://1.1.1.1"]
     assert dns_server_ipv6.dns_servers == [
@@ -70,7 +71,7 @@ async def test_check(coresys: CoreSys, dns_query: AsyncMock, capture_exception: 
 async def test_approve(coresys: CoreSys, dns_query: AsyncMock):
     """Test approve existing DNS Server IPv6 error issues."""
     dns_server_ipv6 = CheckDNSServerIPv6(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     assert dns_server_ipv6.dns_servers == ["dns://192.168.30.1"]
     dns_query.side_effect = DNSError(4, "Domain name not found")
@@ -102,13 +103,13 @@ async def test_did_run(coresys: CoreSys):
 
     with patch.object(CheckDNSServerIPv6, "run_check", return_value=None) as check:
         for state in should_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await dns_server_ipv6()
             check.assert_called_once()
             check.reset_mock()
 
         for state in should_not_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await dns_server_ipv6()
             check.assert_not_called()
             check.reset_mock()
@@ -117,7 +118,7 @@ async def test_did_run(coresys: CoreSys):
 async def test_check_if_affected(coresys: CoreSys):
     """Test that check is still executed even if already affected."""
     dns_server_ipv6 = CheckDNSServerIPv6(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     coresys.resolution.create_issue(
         IssueType.DNS_SERVER_IPV6_ERROR,
@@ -126,11 +127,10 @@ async def test_check_if_affected(coresys: CoreSys):
     )
     assert len(coresys.resolution.issues) == 1
 
-    with patch.object(
-        CheckDNSServerIPv6, "approve_check", return_value=True
-    ) as approve, patch.object(
-        CheckDNSServerIPv6, "run_check", return_value=None
-    ) as check:
+    with (
+        patch.object(CheckDNSServerIPv6, "approve_check", return_value=True) as approve,
+        patch.object(CheckDNSServerIPv6, "run_check", return_value=None) as check,
+    ):
         await dns_server_ipv6()
         approve.assert_called_once()
         check.assert_called_once()

@@ -4,11 +4,13 @@ FROM ${BUILD_FROM}
 ENV \
     S6_SERVICES_GRACETIME=10000 \
     SUPERVISOR_API=http://localhost \
-    CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1
+    CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1 \
+    UV_SYSTEM_PYTHON=true
 
 ARG \
     COSIGN_VERSION \
-    BUILD_ARCH
+    BUILD_ARCH \
+    QEMU_CPU
 
 # Install base
 WORKDIR /usr/src
@@ -26,20 +28,24 @@ RUN \
         yaml \
     \
     && curl -Lso /usr/bin/cosign "https://github.com/home-assistant/cosign/releases/download/${COSIGN_VERSION}/cosign_${BUILD_ARCH}" \
-    && chmod a+x /usr/bin/cosign
+    && chmod a+x /usr/bin/cosign \
+    && pip3 install uv==0.6.1
 
 # Install requirements
 COPY requirements.txt .
 RUN \
-    export MAKEFLAGS="-j$(nproc)" \
-    && pip3 install --only-binary=:all: \
-        -r ./requirements.txt \
+    if [ "${BUILD_ARCH}" = "i386" ]; then \
+        setarch="linux32"; \
+    else \
+        setarch=""; \
+    fi \
+    && ${setarch} uv pip install --compile-bytecode --no-cache --no-build -r requirements.txt \
     && rm -f requirements.txt
 
 # Install Home Assistant Supervisor
 COPY . supervisor
 RUN \
-    pip3 install -e ./supervisor \
+    uv pip install --no-cache -e ./supervisor \
     && python3 -m compileall ./supervisor/supervisor
 
 

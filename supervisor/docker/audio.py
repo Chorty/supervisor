@@ -1,10 +1,11 @@
 """Audio docker object."""
+
 import logging
 
 import docker
 from docker.types import Mount
 
-from ..const import DOCKER_CPU_RUNTIME_ALLOCATION, MACHINE_ID
+from ..const import DOCKER_CPU_RUNTIME_ALLOCATION
 from ..coresys import CoreSysAttributes
 from ..exceptions import DockerJobError
 from ..hardware.const import PolicyGroup
@@ -16,6 +17,7 @@ from .const import (
     MOUNT_DEV,
     MOUNT_MACHINE_ID,
     MOUNT_UDEV,
+    PATH_PRIVATE_DATA,
     Capabilities,
     MountType,
 )
@@ -47,7 +49,7 @@ class DockerAudio(DockerInterface, CoreSysAttributes):
             Mount(
                 type=MountType.BIND,
                 source=self.sys_config.path_extern_audio.as_posix(),
-                target="/data",
+                target=PATH_PRIVATE_DATA.as_posix(),
                 read_only=False,
             ),
             MOUNT_DBUS,
@@ -55,7 +57,7 @@ class DockerAudio(DockerInterface, CoreSysAttributes):
         ]
 
         # Machine ID
-        if MACHINE_ID.exists():
+        if self.sys_machine_id:
             mounts.append(MOUNT_MACHINE_ID)
 
         return mounts

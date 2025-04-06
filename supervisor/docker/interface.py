@@ -1,4 +1,5 @@
 """Interface class for Supervisor Docker object."""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -41,7 +42,7 @@ from ..jobs.const import JOB_GROUP_DOCKER_INTERFACE, JobExecutionLimit
 from ..jobs.decorator import Job
 from ..jobs.job_group import JobGroup
 from ..resolution.const import ContextType, IssueType, SuggestionType
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .const import ContainerState, RestartPolicy
 from .manager import CommandReturn
 from .monitor import DockerContainerStateEvent
@@ -52,7 +53,7 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 IMAGE_WITH_HOST = re.compile(r"^((?:[a-z0-9]+(?:-[a-z0-9]+)*\.)+[a-z]{2,})\/.+")
 DOCKER_HUB = "hub.docker.com"
 
-MAP_ARCH = {
+MAP_ARCH: dict[CpuArch | str, str] = {
     CpuArch.ARMV7: "linux/arm/v7",
     CpuArch.ARMHF: "linux/arm/v6",
     CpuArch.AARCH64: "linux/arm64",
@@ -277,7 +278,7 @@ class DockerInterface(JobGroup):
                 f"Can't install {image}:{version!s}: {err}", _LOGGER.error
             ) from err
         except (docker.errors.DockerException, requests.RequestException) as err:
-            capture_exception(err)
+            await async_capture_exception(err)
             raise DockerError(
                 f"Unknown error with {image}:{version!s} -> {err!s}", _LOGGER.error
             ) from err
@@ -393,7 +394,7 @@ class DockerInterface(JobGroup):
             )
         except DockerNotFound as err:
             # If image is missing, capture the exception as this shouldn't happen
-            capture_exception(err)
+            await async_capture_exception(err)
             raise
 
         # Store metadata
@@ -428,15 +429,17 @@ class DockerInterface(JobGroup):
         limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=DockerJobError,
     )
-    async def remove(self) -> None:
+    async def remove(self, *, remove_image: bool = True) -> None:
         """Remove Docker images."""
         # Cleanup container
         with suppress(DockerError):
             await self.stop()
 
-        await self.sys_run_in_executor(
-            self.sys_docker.remove_image, self.image, self.version
-        )
+        if remove_image:
+            await self.sys_run_in_executor(
+                self.sys_docker.remove_image, self.image, self.version
+            )
+
         self._meta = None
 
     @Job(
@@ -509,14 +512,14 @@ class DockerInterface(JobGroup):
         return b""
 
     @Job(name="docker_interface_cleanup", limit=JobExecutionLimit.GROUP_WAIT)
-    def cleanup(
+    async def cleanup(
         self,
         old_image: str | None = None,
         image: str | None = None,
         version: AwesomeVersion | None = None,
-    ) -> Awaitable[None]:
+    ) -> None:
         """Check if old version exists and cleanup."""
-        return self.sys_run_in_executor(
+        await self.sys_run_in_executor(
             self.sys_docker.cleanup_old_images,
             image or self.image,
             version or self.version,

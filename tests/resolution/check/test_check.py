@@ -1,4 +1,5 @@
 """Test check."""
+
 # pylint: disable=import-error,protected-access
 from unittest.mock import AsyncMock, patch
 
@@ -15,19 +16,22 @@ from supervisor.resolution.validate import get_valid_modules
 @pytest.fixture(autouse=True)
 def fixture_mock_dns_query():
     """Mock aiodns query."""
-    with patch(
-        "supervisor.resolution.checks.dns_server.DNSResolver.query",
-        new_callable=AsyncMock,
-    ), patch(
-        "supervisor.resolution.checks.dns_server_ipv6.DNSResolver.query",
-        new_callable=AsyncMock,
+    with (
+        patch(
+            "supervisor.resolution.checks.dns_server.DNSResolver.query",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "supervisor.resolution.checks.dns_server_ipv6.DNSResolver.query",
+            new_callable=AsyncMock,
+        ),
     ):
         yield
 
 
 async def test_check_setup(coresys: CoreSys):
     """Test check for setup."""
-    coresys.core.state = CoreState.SETUP
+    await coresys.core.set_state(CoreState.SETUP)
     with patch(
         "supervisor.resolution.checks.free_space.CheckFreeSpace.run_check",
         return_value=False,
@@ -38,7 +42,7 @@ async def test_check_setup(coresys: CoreSys):
 
 async def test_check_running(coresys: CoreSys):
     """Test check for setup."""
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     with patch(
         "supervisor.resolution.checks.free_space.CheckFreeSpace.run_check",
         return_value=False,
@@ -50,7 +54,7 @@ async def test_check_running(coresys: CoreSys):
 async def test_if_check_make_issue(coresys: CoreSys):
     """Test check for setup."""
     free_space = Issue(IssueType.FREE_SPACE, ContextType.SYSTEM)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     coresys.security.content_trust = False
 
     with patch("shutil.disk_usage", return_value=(1, 1, 1)):
@@ -62,7 +66,7 @@ async def test_if_check_make_issue(coresys: CoreSys):
 async def test_if_check_cleanup_issue(coresys: CoreSys):
     """Test check for setup."""
     free_space = Issue(IssueType.FREE_SPACE, ContextType.SYSTEM)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     coresys.security.content_trust = False
 
     with patch("shutil.disk_usage", return_value=(1, 1, 1)):
@@ -78,7 +82,7 @@ async def test_if_check_cleanup_issue(coresys: CoreSys):
 
 async def test_enable_disable_checks(coresys: CoreSys):
     """Test enable and disable check."""
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     free_space = coresys.resolution.check.get("free_space")
 
     # Ensure the check was enabled
@@ -107,8 +111,12 @@ async def test_get_checks(coresys: CoreSys):
     assert coresys.resolution.check.get("free_space")
 
 
-def test_dynamic_check_loader(coresys: CoreSys):
+async def test_dynamic_check_loader(coresys: CoreSys):
     """Test dynamic check loader, this ensures that all checks have defined a setup function."""
-    coresys.resolution.check._load()
-    for check in get_valid_modules("checks"):
+
+    def load_modules():
+        coresys.resolution.check.load_modules()
+        return get_valid_modules("checks")
+
+    for check in await coresys.run_in_executor(load_modules):
         assert check in coresys.resolution.check._checks

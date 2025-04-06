@@ -1,4 +1,5 @@
 """Info control for host."""
+
 import asyncio
 from contextlib import suppress
 import logging
@@ -9,7 +10,9 @@ from ..coresys import CoreSys, CoreSysAttributes
 from ..dbus.const import (
     DBUS_ATTR_CONNECTION_ENABLED,
     DBUS_ATTR_CONNECTIVITY,
+    DBUS_ATTR_PRIMARY_CONNECTION,
     DBUS_IFACE_NM,
+    DBUS_OBJECT_BASE,
     DBUS_SIGNAL_NM_CONNECTION_ACTIVE_CHANGED,
     ConnectionStateType,
     ConnectivityState,
@@ -64,6 +67,8 @@ class NetworkManager(CoreSysAttributes):
         self.sys_homeassistant.websocket.supervisor_update_event(
             "network", {ATTR_HOST_INTERNET: state}
         )
+        if state and not self.sys_supervisor.connectivity:
+            self.sys_create_task(self.sys_supervisor.check_connectivity())
 
     @property
     def interfaces(self) -> list[Interface]:
@@ -127,8 +132,8 @@ class NetworkManager(CoreSysAttributes):
                     for interface in interfaces
                     if interface.enabled
                     and (
-                        interface.ipv4.method != InterfaceMethod.DISABLED
-                        or interface.ipv6.method != InterfaceMethod.DISABLED
+                        interface.ipv4setting.method != InterfaceMethod.DISABLED
+                        or interface.ipv6setting.method != InterfaceMethod.DISABLED
                     )
                 ]
             )
@@ -145,7 +150,16 @@ class NetworkManager(CoreSysAttributes):
             return
 
         connectivity_check: bool | None = changed.get(DBUS_ATTR_CONNECTION_ENABLED)
-        connectivity: bool | None = changed.get(DBUS_ATTR_CONNECTIVITY)
+        connectivity: int | None = changed.get(DBUS_ATTR_CONNECTIVITY)
+
+        # This potentially updated the DNS configuration. Make sure the DNS plug-in
+        # picks up the latest settings.
+        if (
+            DBUS_ATTR_PRIMARY_CONNECTION in changed
+            and changed[DBUS_ATTR_PRIMARY_CONNECTION]
+            and changed[DBUS_ATTR_PRIMARY_CONNECTION] != DBUS_OBJECT_BASE
+        ):
+            await self.sys_plugins.dns.restart()
 
         if (
             connectivity_check is True
@@ -235,7 +249,10 @@ class NetworkManager(CoreSysAttributes):
                 ) from err
 
         # Remove config from interface
-        elif inet and inet.settings and not interface.enabled:
+        elif inet and not interface.enabled:
+            if not inet.settings:
+                _LOGGER.debug("Interface %s is already disabled.", interface.name)
+                return
             try:
                 await inet.settings.delete()
             except DBusError as err:

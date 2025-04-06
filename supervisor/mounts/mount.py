@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 import asyncio
+from functools import cached_property
 import logging
 from pathlib import Path, PurePath
 
@@ -29,6 +30,7 @@ from ..dbus.const import (
     UnitActiveState,
 )
 from ..dbus.systemd import SystemdUnit
+from ..docker.const import PATH_MEDIA, PATH_SHARE
 from ..exceptions import (
     DBusError,
     DBusSystemdNoSuchUnit,
@@ -38,7 +40,7 @@ from ..exceptions import (
 )
 from ..resolution.const import ContextType, IssueType
 from ..resolution.data import Issue
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .const import (
     ATTR_PATH,
     ATTR_READ_ONLY,
@@ -68,6 +70,9 @@ class Mount(CoreSysAttributes, ABC):
         self._data: MountData = data
         self._unit: SystemdUnit | None = None
         self._state: UnitActiveState | None = None
+        self._failed_issue = Issue(
+            IssueType.MOUNT_FAILED, ContextType.MOUNT, reference=self.name
+        )
 
     @classmethod
     def from_dict(cls, coresys: CoreSys, data: MountData) -> "Mount":
@@ -147,22 +152,28 @@ class Mount(CoreSysAttributes, ABC):
         """Get state of mount."""
         return self._state
 
-    @property
-    def local_where(self) -> Path | None:
-        """Return where this is mounted within supervisor container.
+    @cached_property
+    def local_where(self) -> Path:
+        """Return where this is mounted within supervisor container."""
+        return self.sys_config.extern_to_local_path(self.where)
 
-        This returns none if 'where' is not within supervisor's host data directory.
+    @property
+    def container_where(self) -> PurePath | None:
+        """Return where this is made available in managed containers (core, addons, etc.).
+
+        This returns none if it is not made available in managed containers.
         """
-        return (
-            self.sys_config.extern_to_local_path(self.where)
-            if self.where.is_relative_to(self.sys_config.path_extern_supervisor)
-            else None
-        )
+        match self.usage:
+            case MountUsage.MEDIA:
+                return PurePath(PATH_MEDIA, self.name)
+            case MountUsage.SHARE:
+                return PurePath(PATH_SHARE, self.name)
+        return None
 
     @property
     def failed_issue(self) -> Issue:
         """Get issue used if this mount has failed."""
-        return Issue(IssueType.MOUNT_FAILED, ContextType.MOUNT, reference=self.name)
+        return self._failed_issue
 
     async def is_mounted(self) -> bool:
         """Return true if successfully mounted and available."""
@@ -190,7 +201,7 @@ class Mount(CoreSysAttributes, ABC):
         try:
             self._state = await self.unit.get_active_state()
         except DBusError as err:
-            capture_exception(err)
+            await async_capture_exception(err)
             raise MountError(
                 f"Could not get active state of mount due to: {err!s}"
             ) from err
@@ -203,7 +214,7 @@ class Mount(CoreSysAttributes, ABC):
             self._unit = None
             self._state = None
         except DBusError as err:
-            capture_exception(err)
+            await async_capture_exception(err)
             raise MountError(f"Could not get mount unit due to: {err!s}") from err
         return self.unit
 
@@ -258,8 +269,8 @@ class Mount(CoreSysAttributes, ABC):
 
     async def mount(self) -> None:
         """Mount using systemd."""
-        # If supervisor can see where it will mount, ensure there's an empty folder there
-        if self.local_where:
+
+        def ensure_empty_folder() -> None:
             if not self.local_where.exists():
                 _LOGGER.info(
                     "Creating folder for mount: %s", self.local_where.as_posix()
@@ -275,6 +286,8 @@ class Mount(CoreSysAttributes, ABC):
                     f"Cannot mount {self.name} at {self.local_where.as_posix()} because it is not empty",
                     _LOGGER.error,
                 )
+
+        await self.sys_run_in_executor(ensure_empty_folder)
 
         try:
             options = (
@@ -470,17 +483,23 @@ class CIFSMount(NetworkMount):
     async def mount(self) -> None:
         """Mount using systemd."""
         if self.username and self.password:
-            if not self.path_credentials.exists():
-                self.path_credentials.touch(mode=0o600)
 
-            with self.path_credentials.open(mode="w") as cred_file:
-                cred_file.write(f"username={self.username}\npassword={self.password}")
+            def write_credentials() -> None:
+                if not self.path_credentials.exists():
+                    self.path_credentials.touch(mode=0o600)
+
+                with self.path_credentials.open(mode="w") as cred_file:
+                    cred_file.write(
+                        f"username={self.username}\npassword={self.password}"
+                    )
+
+            await self.sys_run_in_executor(write_credentials)
 
         await super().mount()
 
     async def unmount(self) -> None:
         """Unmount using systemd."""
-        self.path_credentials.unlink(missing_ok=True)
+        await self.sys_run_in_executor(self.path_credentials.unlink, missing_ok=True)
         await super().unmount()
 
 
@@ -514,6 +533,9 @@ class BindMount(Mount):
         self, coresys: CoreSys, data: MountData, *, where: PurePath | None = None
     ) -> None:
         """Initialize object."""
+        if where and not where.is_relative_to(coresys.config.path_extern_supervisor):
+            raise ValueError("Path must be within Supervisor's host data directory!")
+
         super().__init__(coresys, data)
         self._where = where
 

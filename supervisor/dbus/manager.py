@@ -1,4 +1,5 @@
 """D-Bus interface objects."""
+
 import asyncio
 import logging
 
@@ -17,7 +18,7 @@ from .rauc import Rauc
 from .resolved import Resolved
 from .systemd import Systemd
 from .timedate import TimeDate
-from .udisks2 import UDisks2
+from .udisks2 import UDisks2Manager
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class DBusManager(CoreSysAttributes):
         self._agent: OSAgent = OSAgent()
         self._timedate: TimeDate = TimeDate()
         self._resolved: Resolved = Resolved()
-        self._udisks2: UDisks2 = UDisks2()
+        self._udisks2: UDisks2Manager = UDisks2Manager()
         self._bus: MessageBus | None = None
 
     @property
@@ -81,7 +82,7 @@ class DBusManager(CoreSysAttributes):
         return self._resolved
 
     @property
-    def udisks2(self) -> UDisks2:
+    def udisks2(self) -> UDisks2Manager:
         """Return the udisks2 interface."""
         return self._udisks2
 
@@ -114,7 +115,9 @@ class DBusManager(CoreSysAttributes):
             return
 
         try:
-            self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            self._bus = connected_bus = await MessageBus(
+                bus_type=BusType.SYSTEM
+            ).connect()
         except Exception as err:
             raise DBusFatalError(
                 "Cannot connect to system D-Bus. Disabled any kind of host control!"
@@ -123,15 +126,17 @@ class DBusManager(CoreSysAttributes):
         _LOGGER.info("Connected to system D-Bus.")
 
         errors = await asyncio.gather(
-            *[dbus.connect(self.bus) for dbus in self.all], return_exceptions=True
+            *[dbus.connect(connected_bus) for dbus in self.all], return_exceptions=True
         )
 
-        for err in errors:
-            if err:
+        for error in errors:
+            if error:
+                dbus = self.all[errors.index(error)]
                 _LOGGER.warning(
-                    "Can't load dbus interface %s: %s",
-                    self.all[errors.index(err)].name,
-                    err,
+                    "Can't load dbus interface %s %s: %s",
+                    dbus.name,
+                    dbus.object_path,
+                    error,
                 )
 
         self.sys_host.supported_features.cache_clear()

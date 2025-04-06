@@ -3,7 +3,9 @@
 import asyncio
 from unittest.mock import MagicMock, PropertyMock, patch
 
+from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient
+import pytest
 
 from supervisor.addons.addon import Addon
 from supervisor.addons.build import AddonBuild
@@ -81,7 +83,7 @@ async def test_api_addon_logs_not_installed(api_client: TestClient):
     """Test error is returned for non-existing add-on."""
     resp = await api_client.get("/addons/hic_sunt_leones/logs")
 
-    assert resp.status == 400
+    assert resp.status == 404
     assert resp.content_type == "text/plain"
     content = await resp.text()
     assert content == "Addon hic_sunt_leones does not exist"
@@ -231,13 +233,13 @@ async def test_api_addon_rebuild_healthcheck(
         nonlocal _container_events_task
         _container_events_task = asyncio.create_task(container_events())
 
-    with patch.object(
-        AddonBuild, "is_valid", new=PropertyMock(return_value=True)
-    ), patch.object(DockerAddon, "is_running", return_value=False), patch.object(
-        Addon, "need_build", new=PropertyMock(return_value=True)
-    ), patch.object(
-        CpuArch, "supported", new=PropertyMock(return_value=["amd64"])
-    ), patch.object(DockerAddon, "run", new=container_events_task):
+    with (
+        patch.object(AddonBuild, "is_valid", return_value=True),
+        patch.object(DockerAddon, "is_running", return_value=False),
+        patch.object(Addon, "need_build", new=PropertyMock(return_value=True)),
+        patch.object(CpuArch, "supported", new=PropertyMock(return_value=["amd64"])),
+        patch.object(DockerAddon, "run", new=container_events_task),
+    ):
         resp = await api_client.post("/addons/local_ssh/rebuild")
 
     assert state_changes == [AddonState.STOPPED, AddonState.STARTUP]
@@ -285,3 +287,151 @@ async def test_api_addon_uninstall_remove_config(
     assert resp.status == 200
     assert not coresys.addons.get("local_example", local_only=True)
     assert not test_folder.exists()
+
+
+async def test_api_addon_system_managed(
+    api_client: TestClient,
+    coresys: CoreSys,
+    install_addon_example: Addon,
+    caplog: pytest.LogCaptureFixture,
+    tmp_supervisor_data,
+    path_extern,
+):
+    """Test setting system managed for an addon."""
+    install_addon_example.data["ingress"] = False
+
+    # Not system managed
+    resp = await api_client.get("/addons")
+    body = await resp.json()
+    assert body["data"]["addons"][0]["slug"] == "local_example"
+    assert body["data"]["addons"][0]["system_managed"] is False
+
+    resp = await api_client.get("/addons/local_example/info")
+    body = await resp.json()
+    assert body["data"]["system_managed"] is False
+    assert body["data"]["system_managed_config_entry"] is None
+
+    # Mark as system managed
+    coresys.addons.data.save_data.reset_mock()
+    resp = await api_client.post(
+        "/addons/local_example/sys_options",
+        json={"system_managed": True, "system_managed_config_entry": "abc123"},
+    )
+    assert resp.status == 200
+    coresys.addons.data.save_data.assert_called_once()
+
+    resp = await api_client.get("/addons")
+    body = await resp.json()
+    assert body["data"]["addons"][0]["system_managed"] is True
+
+    resp = await api_client.get("/addons/local_example/info")
+    body = await resp.json()
+    assert body["data"]["system_managed"] is True
+    assert body["data"]["system_managed_config_entry"] == "abc123"
+
+    # Revert. Log that cannot have a config entry if not system managed
+    coresys.addons.data.save_data.reset_mock()
+    resp = await api_client.post(
+        "/addons/local_example/sys_options",
+        json={"system_managed": False, "system_managed_config_entry": "abc123"},
+    )
+    assert resp.status == 200
+    coresys.addons.data.save_data.assert_called_once()
+    assert "Ignoring system managed config entry" in caplog.text
+
+    resp = await api_client.get("/addons")
+    body = await resp.json()
+    assert body["data"]["addons"][0]["system_managed"] is False
+
+    resp = await api_client.get("/addons/local_example/info")
+    body = await resp.json()
+    assert body["data"]["system_managed"] is False
+    assert body["data"]["system_managed_config_entry"] is None
+
+
+async def test_addon_options_boot_mode_manual_only_invalid(
+    api_client: TestClient, install_addon_example: Addon
+):
+    """Test changing boot mode is invalid if set to manual only."""
+    install_addon_example.data["ingress"] = False
+    resp = await api_client.get("/addons/local_example/info")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["data"]["boot"] == "manual"
+    assert body["data"]["boot_config"] == "manual_only"
+
+    resp = await api_client.post("/addons/local_example/options", json={"boot": "auto"})
+    assert resp.status == 400
+    body = await resp.json()
+    assert (
+        body["message"]
+        == "Addon local_example boot option is set to manual_only so it cannot be changed"
+    )
+
+
+async def get_message(resp: ClientResponse, json_expected: bool) -> str:
+    """Get message from response based on response type."""
+    if json_expected:
+        body = await resp.json()
+        return body["message"]
+    return await resp.text()
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "json_expected"),
+    [
+        ("get", "/addons/bad/info", True),
+        ("post", "/addons/bad/uninstall", True),
+        ("post", "/addons/bad/start", True),
+        ("post", "/addons/bad/stop", True),
+        ("post", "/addons/bad/restart", True),
+        ("post", "/addons/bad/options", True),
+        ("post", "/addons/bad/sys_options", True),
+        ("post", "/addons/bad/options/validate", True),
+        ("post", "/addons/bad/rebuild", True),
+        ("post", "/addons/bad/stdin", True),
+        ("post", "/addons/bad/security", True),
+        ("get", "/addons/bad/stats", True),
+        ("get", "/addons/bad/logs", False),
+        ("get", "/addons/bad/logs/follow", False),
+        ("get", "/addons/bad/logs/boots/1", False),
+        ("get", "/addons/bad/logs/boots/1/follow", False),
+    ],
+)
+async def test_addon_not_found(
+    api_client: TestClient, method: str, url: str, json_expected: bool
+):
+    """Test addon not found error."""
+    resp = await api_client.request(method, url)
+    assert resp.status == 404
+    assert await get_message(resp, json_expected) == "Addon bad does not exist"
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "json_expected"),
+    [
+        ("post", "/addons/local_ssh/uninstall", True),
+        ("post", "/addons/local_ssh/start", True),
+        ("post", "/addons/local_ssh/stop", True),
+        ("post", "/addons/local_ssh/restart", True),
+        ("post", "/addons/local_ssh/options", True),
+        ("post", "/addons/local_ssh/sys_options", True),
+        ("post", "/addons/local_ssh/options/validate", True),
+        ("post", "/addons/local_ssh/rebuild", True),
+        ("post", "/addons/local_ssh/stdin", True),
+        ("post", "/addons/local_ssh/security", True),
+        ("get", "/addons/local_ssh/stats", True),
+        ("get", "/addons/local_ssh/logs", False),
+        ("get", "/addons/local_ssh/logs/follow", False),
+        ("get", "/addons/local_ssh/logs/boots/1", False),
+        ("get", "/addons/local_ssh/logs/boots/1/follow", False),
+    ],
+)
+@pytest.mark.usefixtures("repository")
+async def test_addon_not_installed(
+    api_client: TestClient, method: str, url: str, json_expected: bool
+):
+    """Test addon not installed error."""
+    resp = await api_client.request(method, url)
+    assert resp.status == 400
+    assert await get_message(resp, json_expected) == "Addon is not installed"

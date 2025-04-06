@@ -1,21 +1,27 @@
 """Handle core shared data."""
+
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
 from contextvars import Context, copy_context
-from datetime import datetime
+from datetime import UTC, datetime, tzinfo
 from functools import partial
 import logging
 import os
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Self, TypeVar
 
 import aiohttp
 
 from .config import CoreConfig
-from .const import ENV_SUPERVISOR_DEV, SERVER_SOFTWARE
-from .utils.dt import UTC, get_time_zone
+from .const import (
+    ENV_HOMEASSISTANT_REPOSITORY,
+    ENV_SUPERVISOR_DEV,
+    ENV_SUPERVISOR_MACHINE,
+    MACHINE_ID,
+    SERVER_SOFTWARE,
+)
 
 if TYPE_CHECKING:
     from .addons.manager import AddonManager
@@ -62,7 +68,7 @@ class CoreSys:
 
         # External objects
         self._loop: asyncio.BaseEventLoop = asyncio.get_running_loop()
-        self._websession: aiohttp.ClientSession = aiohttp.ClientSession()
+        self._websession = None
 
         # Global objects
         self._config: CoreConfig = CoreConfig()
@@ -95,13 +101,36 @@ class CoreSys:
         self._bus: Bus | None = None
         self._mounts: MountManager | None = None
 
-        # Set default header for aiohttp
-        self._websession._default_headers = MappingProxyType(
-            {aiohttp.hdrs.USER_AGENT: SERVER_SOFTWARE}
-        )
+        # Setup aiohttp session
+        self.create_websession()
 
         # Task factory attributes
         self._set_task_context: list[Callable[[Context], Context]] = []
+
+    async def load_config(self) -> Self:
+        """Load config in executor."""
+        await self.config.read_data()
+        return self
+
+    async def init_machine(self):
+        """Initialize machine information."""
+
+        def _load_machine_id() -> str | None:
+            if MACHINE_ID.exists():
+                return MACHINE_ID.read_text(encoding="utf-8").strip()
+            return None
+
+        self.machine_id = await self.run_in_executor(_load_machine_id)
+
+        # Set machine type
+        if os.environ.get(ENV_SUPERVISOR_MACHINE):
+            self.machine = os.environ[ENV_SUPERVISOR_MACHINE]
+        elif os.environ.get(ENV_HOMEASSISTANT_REPOSITORY):
+            self.machine = os.environ[ENV_HOMEASSISTANT_REPOSITORY][14:-14]
+            _LOGGER.warning(
+                "Missing SUPERVISOR_MACHINE environment variable. Fallback to deprecated extraction!"
+            )
+        _LOGGER.info("Setting up coresys for machine: %s", self.machine)
 
     @property
     def dev(self) -> bool:
@@ -116,6 +145,15 @@ class CoreSys:
         if self.host.info.timezone:
             return self.host.info.timezone
         return "UTC"
+
+    @property
+    def timezone_tzinfo(self) -> tzinfo:
+        """Return system timezone as tzinfo object."""
+        if self.config.timezone_tzinfo:
+            return self.config.timezone_tzinfo
+        if self.host.info.timezone_tzinfo:
+            return self.host.info.timezone_tzinfo
+        return UTC
 
     @property
     def loop(self) -> asyncio.BaseEventLoop:
@@ -522,7 +560,7 @@ class CoreSys:
 
     def now(self) -> datetime:
         """Return now in local timezone."""
-        return datetime.now(get_time_zone(self.timezone) or UTC)
+        return datetime.now(self.timezone_tzinfo)
 
     def add_set_task_context_callback(
         self, callback: Callable[[Context], Context]
@@ -543,6 +581,16 @@ class CoreSys:
             funct = partial(funct, **kwargs)
 
         return self.loop.run_in_executor(None, funct, *args)
+
+    def create_websession(self) -> None:
+        """Create a new aiohttp session."""
+        if self._websession:
+            self.create_task(self._websession.close())
+
+        # Create session and set default header for aiohttp
+        self._websession: aiohttp.ClientSession = aiohttp.ClientSession(
+            headers=MappingProxyType({aiohttp.hdrs.USER_AGENT: SERVER_SOFTWARE})
+        )
 
     def _create_context(self) -> Context:
         """Create a new context for a task."""
@@ -598,6 +646,11 @@ class CoreSysAttributes:
     def sys_machine(self) -> str | None:
         """Return running machine type of the Supervisor system."""
         return self.coresys.machine
+
+    @property
+    def sys_machine_id(self) -> str | None:
+        """Return machine id."""
+        return self.coresys.machine_id
 
     @property
     def sys_dev(self) -> bool:
@@ -754,7 +807,7 @@ class CoreSysAttributes:
         return self.coresys.now()
 
     def sys_run_in_executor(
-        self, funct: Callable[..., T], *args: tuple[Any], **kwargs: dict[str, Any]
+        self, funct: Callable[..., T], *args, **kwargs
     ) -> Coroutine[Any, Any, T]:
         """Add a job to the executor pool."""
         return self.coresys.run_in_executor(funct, *args, **kwargs)
@@ -767,8 +820,8 @@ class CoreSysAttributes:
         self,
         delay: float,
         funct: Callable[..., Coroutine[Any, Any, T]],
-        *args: tuple[Any],
-        **kwargs: dict[str, Any],
+        *args,
+        **kwargs,
     ) -> asyncio.TimerHandle:
         """Start a task after a delay."""
         return self.coresys.call_later(delay, funct, *args, **kwargs)
@@ -777,8 +830,8 @@ class CoreSysAttributes:
         self,
         when: datetime,
         funct: Callable[..., Coroutine[Any, Any, T]],
-        *args: tuple[Any],
-        **kwargs: dict[str, Any],
+        *args,
+        **kwargs,
     ) -> asyncio.TimerHandle:
         """Start a task at the specified datetime."""
         return self.coresys.call_at(when, funct, *args, **kwargs)

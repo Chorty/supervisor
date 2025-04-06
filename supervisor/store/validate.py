@@ -8,11 +8,13 @@ from .const import StoreType
 
 URL_COMMUNITY_ADDONS = "https://github.com/hassio-addons/repository"
 URL_ESPHOME = "https://github.com/esphome/home-assistant-addon"
+URL_MUSIC_ASSISTANT = "https://github.com/music-assistant/home-assistant-addon"
 BUILTIN_REPOSITORIES = {
     StoreType.CORE,
     StoreType.LOCAL,
     URL_COMMUNITY_ADDONS,
     URL_ESPHOME,
+    URL_MUSIC_ASSISTANT,
 }
 
 # pylint: disable=no-value-for-parameter
@@ -24,6 +26,15 @@ SCHEMA_REPOSITORY_CONFIG = vol.Schema(
     },
     extra=vol.REMOVE_EXTRA,
 )
+
+
+def ensure_builtin_repositories(addon_repositories: list[str]) -> list[str]:
+    """Ensure builtin repositories are in list.
+
+    Note: This should not be used in validation as the resulting list is not
+    stable. This can have side effects when comparing data later on.
+    """
+    return list(set(addon_repositories) | BUILTIN_REPOSITORIES)
 
 
 def validate_repository(repository: str) -> str:
@@ -42,13 +53,7 @@ def validate_repository(repository: str) -> str:
     return repository
 
 
-def ensure_builtin_repositories(addon_repositories: list[str]) -> list[str]:
-    """Ensure builtin repositories are in list."""
-    return list(set(addon_repositories) | BUILTIN_REPOSITORIES)
-
-
-# pylint: disable=no-value-for-parameter
-repositories = vol.All([validate_repository], vol.Unique(), ensure_builtin_repositories)
+repositories = vol.All([validate_repository], vol.Unique())
 
 SCHEMA_STORE_FILE = vol.Schema(
     {

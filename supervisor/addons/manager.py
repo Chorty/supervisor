@@ -1,30 +1,29 @@
 """Supervisor add-on manager."""
+
 import asyncio
 from collections.abc import Awaitable
 from contextlib import suppress
 import logging
 import tarfile
-from typing import Union
+from typing import Self, Union
+
+from attr import evolve
 
 from ..const import AddonBoot, AddonStartup, AddonState
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import (
-    AddonConfigurationError,
     AddonsError,
     AddonsJobError,
     AddonsNotSupportedError,
     CoreDNSError,
-    DockerAPIError,
     DockerError,
-    DockerNotFound,
     HassioError,
     HomeAssistantAPIError,
 )
 from ..jobs.decorator import Job, JobCondition
 from ..resolution.const import ContextType, IssueType, SuggestionType
 from ..store.addon import AddonStore
-from ..utils import check_exception_chain
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .addon import Addon
 from .const import ADDON_UPDATE_CONDITIONS
 from .data import AddonsData
@@ -75,6 +74,11 @@ class AddonManager(CoreSysAttributes):
                 return addon
         return None
 
+    async def load_config(self) -> Self:
+        """Load config in executor."""
+        await self.data.read_data()
+        return self
+
     async def load(self) -> None:
         """Start up add-on management."""
         # Refresh cache for all store addons
@@ -117,15 +121,14 @@ class AddonManager(CoreSysAttributes):
             try:
                 if start_task := await addon.start():
                     wait_boot.append(start_task)
-            except AddonsError as err:
-                # Check if there is an system/user issue
-                if check_exception_chain(
-                    err, (DockerAPIError, DockerNotFound, AddonConfigurationError)
-                ):
-                    addon.boot = AddonBoot.MANUAL
-                    addon.save_persist()
             except HassioError:
-                pass  # These are already handled
+                self.sys_resolution.add_issue(
+                    evolve(addon.boot_failed_issue),
+                    suggestions=[
+                        SuggestionType.EXECUTE_START,
+                        SuggestionType.DISABLE_BOOT,
+                    ],
+                )
             else:
                 continue
 
@@ -133,6 +136,19 @@ class AddonManager(CoreSysAttributes):
 
         # Ignore exceptions from waiting for addon startup, addon errors handled elsewhere
         await asyncio.gather(*wait_boot, return_exceptions=True)
+
+        # After waiting for startup, create an issue for boot addons that are error or unknown state
+        # Ignore stopped as single shot addons can be run at boot and this is successful exit
+        # Timeout waiting for startup is not a failure, addon is probably just slow
+        for addon in tasks:
+            if addon.state in {AddonState.ERROR, AddonState.UNKNOWN}:
+                self.sys_resolution.add_issue(
+                    evolve(addon.boot_failed_issue),
+                    suggestions=[
+                        SuggestionType.EXECUTE_START,
+                        SuggestionType.DISABLE_BOOT,
+                    ],
+                )
 
     async def shutdown(self, stage: AddonStartup) -> None:
         """Shutdown addons."""
@@ -154,7 +170,7 @@ class AddonManager(CoreSysAttributes):
                 await addon.stop()
             except Exception as err:  # pylint: disable=broad-except
                 _LOGGER.warning("Can't stop Add-on %s: %s", addon.slug, err)
-                capture_exception(err)
+                await async_capture_exception(err)
 
     @Job(
         name="addon_manager_install",
@@ -178,13 +194,22 @@ class AddonManager(CoreSysAttributes):
 
         _LOGGER.info("Add-on '%s' successfully installed", slug)
 
+    @Job(name="addon_manager_uninstall")
     async def uninstall(self, slug: str, *, remove_config: bool = False) -> None:
         """Remove an add-on."""
         if slug not in self.local:
             _LOGGER.warning("Add-on %s is not installed", slug)
             return
 
-        await self.local[slug].uninstall(remove_config=remove_config)
+        shared_image = any(
+            self.local[slug].image == addon.image
+            and self.local[slug].version == addon.version
+            for addon in self.installed
+            if addon.slug != slug
+        )
+        await self.local[slug].uninstall(
+            remove_config=remove_config, remove_image=not shared_image
+        )
 
         _LOGGER.info("Add-on '%s' successfully removed", slug)
 
@@ -289,7 +314,7 @@ class AddonManager(CoreSysAttributes):
         if slug not in self.local:
             _LOGGER.debug("Add-on %s is not local available for restore", slug)
             addon = Addon(self.coresys, slug)
-            had_ingress = False
+            had_ingress: bool | None = False
         else:
             _LOGGER.debug("Add-on %s is local available for restore", slug)
             addon = self.local[slug]
@@ -364,7 +389,7 @@ class AddonManager(CoreSysAttributes):
                     reference=addon.slug,
                     suggestions=[SuggestionType.EXECUTE_REPAIR],
                 )
-                capture_exception(err)
+                await async_capture_exception(err)
             else:
                 add_host_coros.append(
                     self.sys_plugins.dns.add_host(

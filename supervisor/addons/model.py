@@ -1,4 +1,5 @@
 """Init file for Supervisor add-ons."""
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -46,7 +47,7 @@ from ..const import (
     ATTR_JOURNALD,
     ATTR_KERNEL_MODULES,
     ATTR_LEGACY,
-    ATTR_LOCATON,
+    ATTR_LOCATION,
     ATTR_MACHINE,
     ATTR_MAP,
     ATTR_NAME,
@@ -82,6 +83,7 @@ from ..const import (
     SECURITY_DISABLE,
     SECURITY_PROFILE,
     AddonBoot,
+    AddonBootConfig,
     AddonStage,
     AddonStartup,
 )
@@ -149,9 +151,14 @@ class AddonModel(JobGroup, ABC):
         return self.data[ATTR_OPTIONS]
 
     @property
-    def boot(self) -> AddonBoot:
-        """Return boot config with prio local settings."""
+    def boot_config(self) -> AddonBootConfig:
+        """Return boot config."""
         return self.data[ATTR_BOOT]
+
+    @property
+    def boot(self) -> AddonBoot:
+        """Return boot config with prio local settings unless config is forced."""
+        return AddonBoot(self.data[ATTR_BOOT])
 
     @property
     def auto_update(self) -> bool | None:
@@ -202,18 +209,6 @@ class AddonModel(JobGroup, ABC):
     def description(self) -> str:
         """Return description of add-on."""
         return self.data[ATTR_DESCRIPTON]
-
-    @property
-    def long_description(self) -> str | None:
-        """Return README.md as long_description."""
-        readme = Path(self.path_location, "README.md")
-
-        # If readme not exists
-        if not readme.exists():
-            return None
-
-        # Return data
-        return readme.read_text(encoding="utf-8")
 
     @property
     def repository(self) -> str:
@@ -299,7 +294,7 @@ class AddonModel(JobGroup, ABC):
         return self.data.get(ATTR_WEBUI)
 
     @property
-    def watchdog(self) -> str | None:
+    def watchdog_url(self) -> str | None:
         """Return URL to for watchdog or None."""
         return self.data.get(ATTR_WATCHDOG)
 
@@ -574,7 +569,7 @@ class AddonModel(JobGroup, ABC):
     @property
     def path_location(self) -> Path:
         """Return path to this add-on."""
-        return Path(self.data[ATTR_LOCATON])
+        return Path(self.data[ATTR_LOCATION])
 
     @property
     def path_icon(self) -> Path:
@@ -611,7 +606,7 @@ class AddonModel(JobGroup, ABC):
         return AddonOptions(self.coresys, raw_schema, self.name, self.slug)
 
     @property
-    def schema_ui(self) -> list[dict[any, any]] | None:
+    def schema_ui(self) -> list[dict[Any, Any]] | None:
         """Create a UI schema for add-on options."""
         raw_schema = self.data[ATTR_SCHEMA]
 
@@ -638,6 +633,21 @@ class AddonModel(JobGroup, ABC):
     def breaking_versions(self) -> list[AwesomeVersion]:
         """Return breaking versions of addon."""
         return self.data[ATTR_BREAKING_VERSIONS]
+
+    async def long_description(self) -> str | None:
+        """Return README.md as long_description."""
+
+        def read_readme() -> str | None:
+            readme = Path(self.path_location, "README.md")
+
+            # If readme not exists
+            if not readme.exists():
+                return None
+
+            # Return data
+            return readme.read_text(encoding="utf-8")
+
+        return await self.sys_run_in_executor(read_readme)
 
     def refresh_path_cache(self) -> Awaitable[None]:
         """Refresh cache of existing paths."""

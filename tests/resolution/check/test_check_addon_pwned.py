@@ -1,4 +1,5 @@
 """Test Check Addon Pwned."""
+
 # pylint: disable=import-error,protected-access
 from unittest.mock import AsyncMock, patch
 
@@ -28,7 +29,7 @@ async def test_base(coresys: CoreSys):
 async def test_check(coresys: CoreSys):
     """Test check."""
     addon_pwned = CheckAddonPwned(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     addon = TestAddon()
     coresys.addons.local[addon.slug] = addon
@@ -60,7 +61,7 @@ async def test_check(coresys: CoreSys):
 async def test_approve(coresys: CoreSys):
     """Test check."""
     addon_pwned = CheckAddonPwned(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     addon = TestAddon()
     coresys.addons.local[addon.slug] = addon
@@ -81,7 +82,7 @@ async def test_with_global_disable(coresys: CoreSys, caplog):
     """Test when pwned is globally disabled."""
     coresys.security.pwned = False
     addon_pwned = CheckAddonPwned(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     addon = TestAddon()
     coresys.addons.local[addon.slug] = addon
@@ -106,13 +107,13 @@ async def test_did_run(coresys: CoreSys):
         return_value=None,
     ) as check:
         for state in should_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await addon_pwned()
             check.assert_called_once()
             check.reset_mock()
 
         for state in should_not_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await addon_pwned()
             check.assert_not_called()
             check.reset_mock()

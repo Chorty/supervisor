@@ -1,4 +1,5 @@
 """Init file for Supervisor DNS RESTful API."""
+
 import asyncio
 from collections.abc import Awaitable
 import logging
@@ -77,7 +78,7 @@ class APICoreDNS(CoreSysAttributes):
         if restart_required:
             self.sys_create_task(self.sys_plugins.dns.restart())
 
-        self.sys_plugins.dns.save_data()
+        await self.sys_plugins.dns.save_data()
 
     @api_process
     async def stats(self, request: web.Request) -> dict[str, Any]:

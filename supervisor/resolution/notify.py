@@ -3,6 +3,7 @@
 This helper creates persistant notification in the Core UI.
 In the future we want to remove this in favour of a "center" in the UI.
 """
+
 import logging
 
 from ..coresys import CoreSys, CoreSysAttributes
@@ -35,7 +36,7 @@ class ResolutionNotify(CoreSysAttributes):
                 messages.append(
                     {
                         "title": "Available space is less than 1GB!",
-                        "message": f"Available space is {self.sys_host.info.free_space}GB, see https://www.home-assistant.io/more-info/free-space for more information.",
+                        "message": f"Available space is {await self.sys_host.info.free_space()}GB, see https://www.home-assistant.io/more-info/free-space for more information.",
                         "notification_id": "supervisor_issue_free_space",
                     }
                 )

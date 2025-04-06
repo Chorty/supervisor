@@ -1,15 +1,15 @@
 """Init file for Supervisor Home Assistant RESTful API."""
+
 import asyncio
 from collections.abc import Awaitable
 import logging
-from typing import Any
+from typing import Any, TypedDict
 
 from aiohttp import web
 import voluptuous as vol
 from voluptuous.humanize import humanize_error
 
 from ..addons.addon import Addon
-from ..addons.manager import AnyAddon
 from ..addons.utils import rating_security
 from ..const import (
     ATTR_ADDONS,
@@ -62,7 +62,6 @@ from ..const import (
     ATTR_MEMORY_LIMIT,
     ATTR_MEMORY_PERCENT,
     ATTR_MEMORY_USAGE,
-    ATTR_MESSAGE,
     ATTR_NAME,
     ATTR_NETWORK,
     ATTR_NETWORK_DESCRIPTION,
@@ -71,7 +70,6 @@ from ..const import (
     ATTR_OPTIONS,
     ATTR_PRIVILEGED,
     ATTR_PROTECTED,
-    ATTR_PWNED,
     ATTR_RATING,
     ATTR_REPOSITORY,
     ATTR_SCHEMA,
@@ -81,13 +79,14 @@ from ..const import (
     ATTR_STARTUP,
     ATTR_STATE,
     ATTR_STDIN,
+    ATTR_SYSTEM_MANAGED,
+    ATTR_SYSTEM_MANAGED_CONFIG_ENTRY,
     ATTR_TRANSLATIONS,
     ATTR_UART,
     ATTR_UDEV,
     ATTR_UPDATE_AVAILABLE,
     ATTR_URL,
     ATTR_USB,
-    ATTR_VALID,
     ATTR_VERSION,
     ATTR_VERSION_LATEST,
     ATTR_VIDEO,
@@ -95,6 +94,7 @@ from ..const import (
     ATTR_WEBUI,
     REQUEST_FROM,
     AddonBoot,
+    AddonBootConfig,
 )
 from ..coresys import CoreSysAttributes
 from ..docker.stats import DockerStats
@@ -102,11 +102,12 @@ from ..exceptions import (
     APIAddonNotInstalled,
     APIError,
     APIForbidden,
+    APINotFound,
     PwnedError,
     PwnedSecret,
 )
 from ..validate import docker_ports
-from .const import ATTR_REMOVE_CONFIG, ATTR_SIGNED
+from .const import ATTR_BOOT_CONFIG, ATTR_REMOVE_CONFIG, ATTR_SIGNED
 from .utils import api_process, api_validate, json_loads
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -126,6 +127,13 @@ SCHEMA_OPTIONS = vol.Schema(
     }
 )
 
+SCHEMA_SYS_OPTIONS = vol.Schema(
+    {
+        vol.Optional(ATTR_SYSTEM_MANAGED): vol.Boolean(),
+        vol.Optional(ATTR_SYSTEM_MANAGED_CONFIG_ENTRY): vol.Maybe(str),
+    }
+)
+
 SCHEMA_SECURITY = vol.Schema({vol.Optional(ATTR_PROTECTED): vol.Boolean()})
 
 SCHEMA_UNINSTALL = vol.Schema(
@@ -134,12 +142,20 @@ SCHEMA_UNINSTALL = vol.Schema(
 # pylint: enable=no-value-for-parameter
 
 
+class OptionsValidateResponse(TypedDict):
+    """Response object for options validate."""
+
+    message: str
+    valid: bool
+    pwned: bool | None
+
+
 class APIAddons(CoreSysAttributes):
     """Handle RESTful API for add-on functions."""
 
     def get_addon_for_request(self, request: web.Request) -> Addon:
         """Return addon, throw an exception if it doesn't exist."""
-        addon_slug: str = request.match_info.get("addon")
+        addon_slug: str = request.match_info["addon"]
 
         # Lookup itself
         if addon_slug == "self":
@@ -150,14 +166,14 @@ class APIAddons(CoreSysAttributes):
 
         addon = self.sys_addons.get(addon_slug)
         if not addon:
-            raise APIError(f"Addon {addon_slug} does not exist")
+            raise APINotFound(f"Addon {addon_slug} does not exist")
         if not isinstance(addon, Addon) or not addon.is_installed:
             raise APIAddonNotInstalled("Addon is not installed")
 
         return addon
 
     @api_process
-    async def list(self, request: web.Request) -> dict[str, Any]:
+    async def list_addons(self, request: web.Request) -> dict[str, Any]:
         """Return all add-ons or repositories."""
         data_addons = [
             {
@@ -178,6 +194,7 @@ class APIAddons(CoreSysAttributes):
                 ATTR_URL: addon.url,
                 ATTR_ICON: addon.with_icon,
                 ATTR_LOGO: addon.with_logo,
+                ATTR_SYSTEM_MANAGED: addon.system_managed,
             }
             for addon in self.sys_addons.installed
         ]
@@ -191,7 +208,7 @@ class APIAddons(CoreSysAttributes):
 
     async def info(self, request: web.Request) -> dict[str, Any]:
         """Return add-on information."""
-        addon: AnyAddon = self.get_addon_for_request(request)
+        addon: Addon = self.get_addon_for_request(request)
 
         data = {
             ATTR_NAME: addon.name,
@@ -199,13 +216,14 @@ class APIAddons(CoreSysAttributes):
             ATTR_HOSTNAME: addon.hostname,
             ATTR_DNS: addon.dns,
             ATTR_DESCRIPTON: addon.description,
-            ATTR_LONG_DESCRIPTION: addon.long_description,
+            ATTR_LONG_DESCRIPTION: await addon.long_description(),
             ATTR_ADVANCED: addon.advanced,
             ATTR_STAGE: addon.stage,
             ATTR_REPOSITORY: addon.repository,
             ATTR_VERSION_LATEST: addon.latest_version,
             ATTR_PROTECTED: addon.protected,
             ATTR_RATING: rating_security(addon),
+            ATTR_BOOT_CONFIG: addon.boot_config,
             ATTR_BOOT: addon.boot,
             ATTR_OPTIONS: addon.options,
             ATTR_SCHEMA: addon.schema_ui,
@@ -265,6 +283,8 @@ class APIAddons(CoreSysAttributes):
             ATTR_WATCHDOG: addon.watchdog,
             ATTR_DEVICES: addon.static_devices
             + [device.path for device in addon.devices],
+            ATTR_SYSTEM_MANAGED: addon.system_managed,
+            ATTR_SYSTEM_MANAGED_CONFIG_ENTRY: addon.system_managed_config_entry,
         }
 
         return data
@@ -287,6 +307,10 @@ class APIAddons(CoreSysAttributes):
         if ATTR_OPTIONS in body:
             addon.options = body[ATTR_OPTIONS]
         if ATTR_BOOT in body:
+            if addon.boot_config == AddonBootConfig.MANUAL_ONLY:
+                raise APIError(
+                    f"Addon {addon.slug} boot option is set to {addon.boot_config} so it cannot be changed"
+                )
             addon.boot = body[ATTR_BOOT]
         if ATTR_AUTO_UPDATE in body:
             addon.auto_update = body[ATTR_AUTO_UPDATE]
@@ -302,13 +326,27 @@ class APIAddons(CoreSysAttributes):
         if ATTR_WATCHDOG in body:
             addon.watchdog = body[ATTR_WATCHDOG]
 
-        addon.save_persist()
+        await addon.save_persist()
 
     @api_process
-    async def options_validate(self, request: web.Request) -> None:
+    async def sys_options(self, request: web.Request) -> None:
+        """Store system options for an add-on."""
+        addon = self.get_addon_for_request(request)
+
+        # Validate/Process Body
+        body = await api_validate(SCHEMA_SYS_OPTIONS, request)
+        if ATTR_SYSTEM_MANAGED in body:
+            addon.system_managed = body[ATTR_SYSTEM_MANAGED]
+        if ATTR_SYSTEM_MANAGED_CONFIG_ENTRY in body:
+            addon.system_managed_config_entry = body[ATTR_SYSTEM_MANAGED_CONFIG_ENTRY]
+
+        await addon.save_persist()
+
+    @api_process
+    async def options_validate(self, request: web.Request) -> OptionsValidateResponse:
         """Validate user options for add-on."""
         addon = self.get_addon_for_request(request)
-        data = {ATTR_MESSAGE: "", ATTR_VALID: True, ATTR_PWNED: False}
+        data = OptionsValidateResponse(message="", valid=True, pwned=False)
 
         options = await request.json(loads=json_loads) or addon.options
 
@@ -317,8 +355,8 @@ class APIAddons(CoreSysAttributes):
         try:
             options_schema.validate(options)
         except vol.Invalid as ex:
-            data[ATTR_MESSAGE] = humanize_error(options, ex)
-            data[ATTR_VALID] = False
+            data["message"] = humanize_error(options, ex)
+            data["valid"] = False
 
         if not self.sys_security.pwned:
             return data
@@ -329,24 +367,24 @@ class APIAddons(CoreSysAttributes):
                 await self.sys_security.verify_secret(secret)
                 continue
             except PwnedSecret:
-                data[ATTR_PWNED] = True
+                data["pwned"] = True
             except PwnedError:
-                data[ATTR_PWNED] = None
+                data["pwned"] = None
             break
 
-        if self.sys_security.force and data[ATTR_PWNED] in (None, True):
-            data[ATTR_VALID] = False
-            if data[ATTR_PWNED] is None:
-                data[ATTR_MESSAGE] = "Error happening on pwned secrets check!"
+        if self.sys_security.force and data["pwned"] in (None, True):
+            data["valid"] = False
+            if data["pwned"] is None:
+                data["message"] = "Error happening on pwned secrets check!"
             else:
-                data[ATTR_MESSAGE] = "Add-on uses pwned secrets!"
+                data["message"] = "Add-on uses pwned secrets!"
 
         return data
 
     @api_process
     async def options_config(self, request: web.Request) -> None:
         """Validate user options for add-on."""
-        slug: str = request.match_info.get("addon")
+        slug: str = request.match_info["addon"]
         if slug != "self":
             raise APIForbidden("This can be only read by the Add-on itself!")
         addon = self.get_addon_for_request(request)
@@ -368,7 +406,7 @@ class APIAddons(CoreSysAttributes):
             _LOGGER.warning("Changing protected flag for %s!", addon.slug)
             addon.protected = body[ATTR_PROTECTED]
 
-        addon.save_persist()
+        await addon.save_persist()
 
     @api_process
     async def stats(self, request: web.Request) -> dict[str, Any]:

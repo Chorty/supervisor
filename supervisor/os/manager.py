@@ -1,4 +1,5 @@
 """OS support on supervisor."""
+
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +24,7 @@ from ..exceptions import (
 from ..jobs.const import JobCondition, JobExecutionLimit
 from ..jobs.decorator import Job
 from ..resolution.const import UnhealthyReason
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .data_disk import DataDisk
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -216,12 +217,15 @@ class OSManager(CoreSysAttributes):
                     )
 
                 # Download RAUCB file
-                with raucb.open("wb") as ota_file:
+                ota_file = await self.sys_run_in_executor(raucb.open, "wb")
+                try:
                     while True:
                         chunk = await request.content.read(1_048_576)
                         if not chunk:
                             break
-                        ota_file.write(chunk)
+                        await self.sys_run_in_executor(ota_file.write, chunk)
+                finally:
+                    await self.sys_run_in_executor(ota_file.close)
 
             _LOGGER.info("Completed download of OTA update file %s", raucb)
 
@@ -233,7 +237,9 @@ class OSManager(CoreSysAttributes):
 
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             raise HassOSUpdateError(
                 f"Can't write OTA file: {err!s}", _LOGGER.error
             ) from err
@@ -353,11 +359,19 @@ class OSManager(CoreSysAttributes):
     async def mark_healthy(self) -> None:
         """Set booted partition as good for rauc."""
         try:
-            response = await self.sys_dbus.rauc.mark(RaucState.GOOD, "booted")
+            responses = [
+                await self.sys_dbus.rauc.mark(RaucState.ACTIVE, "booted"),
+                await self.sys_dbus.rauc.mark(RaucState.GOOD, "booted"),
+            ]
         except DBusError:
-            _LOGGER.error("Can't mark booted partition as healthy!")
+            _LOGGER.exception("Can't mark booted partition as healthy!")
         else:
-            _LOGGER.info("Rauc: %s - %s", self.sys_dbus.rauc.boot_slot, response[1])
+            _LOGGER.info(
+                "Rauc: slot %s - %s, %s",
+                self.sys_dbus.rauc.boot_slot,
+                responses[0][1],
+                responses[1][1],
+            )
             await self.reload()
 
     @Job(
@@ -373,7 +387,7 @@ class OSManager(CoreSysAttributes):
                 RaucState.ACTIVE, self.get_slot_name(boot_name)
             )
         except DBusError as err:
-            capture_exception(err)
+            await async_capture_exception(err)
             raise HassOSSlotUpdateError(
                 f"Can't mark {boot_name} as active!", _LOGGER.error
             ) from err

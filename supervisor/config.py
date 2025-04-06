@@ -1,5 +1,7 @@
 """Bootstrap Supervisor."""
-from datetime import UTC, datetime
+
+import asyncio
+from datetime import UTC, datetime, tzinfo
 import logging
 import os
 from pathlib import Path, PurePath
@@ -10,6 +12,7 @@ from .const import (
     ATTR_ADDONS_CUSTOM_LIST,
     ATTR_DEBUG,
     ATTR_DEBUG_BLOCK,
+    ATTR_DETECT_BLOCKING_IO,
     ATTR_DIAGNOSTICS,
     ATTR_IMAGE,
     ATTR_LAST_BOOT,
@@ -23,7 +26,7 @@ from .const import (
     LogLevel,
 )
 from .utils.common import FileConfiguration
-from .utils.dt import parse_datetime
+from .utils.dt import get_time_zone, parse_datetime
 from .validate import SCHEMA_SUPERVISOR_CONFIG
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -49,6 +52,7 @@ MOUNTS_FOLDER = PurePath("mounts")
 MOUNTS_CREDENTIALS = PurePath(".mounts_credentials")
 EMERGENCY_DATA = PurePath("emergency")
 ADDON_CONFIGS = PurePath("addon_configs")
+CORE_BACKUP_DATA = PurePath("core/backup")
 
 DEFAULT_BOOT_TIME = datetime.fromtimestamp(0, UTC).isoformat()
 
@@ -64,6 +68,7 @@ class CoreConfig(FileConfiguration):
     def __init__(self):
         """Initialize config object."""
         super().__init__(FILE_HASSIO_CONFIG, SCHEMA_SUPERVISOR_CONFIG)
+        self._timezone_tzinfo: tzinfo | None = None
 
     @property
     def timezone(self) -> str | None:
@@ -74,12 +79,19 @@ class CoreConfig(FileConfiguration):
         self._data.pop(ATTR_TIMEZONE, None)
         return None
 
-    @timezone.setter
-    def timezone(self, value: str) -> None:
+    @property
+    def timezone_tzinfo(self) -> tzinfo | None:
+        """Return system timezone as tzinfo object."""
+        return self._timezone_tzinfo
+
+    async def set_timezone(self, value: str) -> None:
         """Set system timezone."""
         if value == _UTC:
             return
         self._data[ATTR_TIMEZONE] = value
+        self._timezone_tzinfo = await asyncio.get_running_loop().run_in_executor(
+            None, get_time_zone, value
+        )
 
     @property
     def version(self) -> AwesomeVersion:
@@ -130,6 +142,16 @@ class CoreConfig(FileConfiguration):
     def debug_block(self, value: bool) -> None:
         """Set debug wait mode."""
         self._data[ATTR_DEBUG_BLOCK] = value
+
+    @property
+    def detect_blocking_io(self) -> bool:
+        """Return True if blocking I/O in event loop detection enabled at startup."""
+        return self._data[ATTR_DETECT_BLOCKING_IO]
+
+    @detect_blocking_io.setter
+    def detect_blocking_io(self, value: bool) -> None:
+        """Enable/Disable blocking I/O in event loop detection at startup."""
+        self._data[ATTR_DETECT_BLOCKING_IO] = value
 
     @property
     def diagnostics(self) -> bool | None:
@@ -273,6 +295,16 @@ class CoreConfig(FileConfiguration):
         return PurePath(self.path_extern_supervisor, BACKUP_DATA)
 
     @property
+    def path_core_backup(self) -> Path:
+        """Return core specific backup folder (cloud backup)."""
+        return self.path_supervisor / CORE_BACKUP_DATA
+
+    @property
+    def path_extern_core_backup(self) -> PurePath:
+        """Return core specific backup folder (cloud backup) external for Docker."""
+        return PurePath(self.path_extern_supervisor, CORE_BACKUP_DATA)
+
+    @property
     def path_share(self) -> Path:
         """Return root share data folder."""
         return self.path_supervisor / SHARE_DATA
@@ -378,3 +410,15 @@ class CoreConfig(FileConfiguration):
     def extern_to_local_path(self, path: PurePath) -> Path:
         """Translate a path relative to extern supervisor data to its path in the container."""
         return self.path_supervisor / path.relative_to(self.path_extern_supervisor)
+
+    async def read_data(self) -> None:
+        """Read configuration file."""
+        timezone = self.timezone
+        await super().read_data()
+
+        if not self.timezone:
+            self._timezone_tzinfo = None
+        elif timezone != self.timezone:
+            self._timezone_tzinfo = await asyncio.get_running_loop().run_in_executor(
+                None, get_time_zone, self.timezone
+            )

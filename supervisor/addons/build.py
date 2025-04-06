@@ -1,9 +1,10 @@
 """Supervisor add-on build environment."""
+
 from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from awesomeversion import AwesomeVersion
 
@@ -22,7 +23,7 @@ from ..utils.common import FileConfiguration, find_one_filetype
 from .validate import SCHEMA_BUILD_CONFIG
 
 if TYPE_CHECKING:
-    from . import AnyAddon
+    from .manager import AnyAddon
 
 
 class AddonBuild(FileConfiguration, CoreSysAttributes):
@@ -33,23 +34,36 @@ class AddonBuild(FileConfiguration, CoreSysAttributes):
         self.coresys: CoreSys = coresys
         self.addon = addon
 
+        # Search for build file later in executor
+        super().__init__(None, SCHEMA_BUILD_CONFIG)
+
+    def _get_build_file(self) -> Path:
+        """Get build file.
+
+        Must be run in executor.
+        """
         try:
-            build_file = find_one_filetype(
+            return find_one_filetype(
                 self.addon.path_location, "build", FILE_SUFFIX_CONFIGURATION
             )
         except ConfigurationFileError:
-            build_file = self.addon.path_location / "build.json"
+            return self.addon.path_location / "build.json"
 
-        super().__init__(build_file, SCHEMA_BUILD_CONFIG)
+    async def read_data(self) -> None:
+        """Load data from file."""
+        if not self._file:
+            self._file = await self.sys_run_in_executor(self._get_build_file)
 
-    def save_data(self):
+        await super().read_data()
+
+    async def save_data(self):
         """Ignore save function."""
         raise RuntimeError()
 
     @cached_property
     def arch(self) -> str:
         """Return arch of the add-on."""
-        return self.sys_arch.match(self.addon.arch)
+        return self.sys_arch.match([self.addon.arch])
 
     @property
     def base_image(self) -> str:
@@ -68,13 +82,6 @@ class AddonBuild(FileConfiguration, CoreSysAttributes):
         return self._data[ATTR_BUILD_FROM][self.arch]
 
     @property
-    def dockerfile(self) -> Path:
-        """Return Dockerfile path."""
-        if self.addon.path_location.joinpath(f"Dockerfile.{self.arch}").exists():
-            return self.addon.path_location.joinpath(f"Dockerfile.{self.arch}")
-        return self.addon.path_location.joinpath("Dockerfile")
-
-    @property
     def squash(self) -> bool:
         """Return True or False if squash is active."""
         return self._data[ATTR_SQUASH]
@@ -89,25 +96,40 @@ class AddonBuild(FileConfiguration, CoreSysAttributes):
         """Return additional Docker labels."""
         return self._data[ATTR_LABELS]
 
-    @property
-    def is_valid(self) -> bool:
+    def get_dockerfile(self) -> Path:
+        """Return Dockerfile path.
+
+        Must be run in executor.
+        """
+        if self.addon.path_location.joinpath(f"Dockerfile.{self.arch}").exists():
+            return self.addon.path_location.joinpath(f"Dockerfile.{self.arch}")
+        return self.addon.path_location.joinpath("Dockerfile")
+
+    async def is_valid(self) -> bool:
         """Return true if the build env is valid."""
-        try:
+
+        def build_is_valid() -> bool:
             return all(
                 [
                     self.addon.path_location.is_dir(),
-                    self.dockerfile.is_file(),
+                    self.get_dockerfile().is_file(),
                 ]
             )
+
+        try:
+            return await self.sys_run_in_executor(build_is_valid)
         except HassioArchNotFound:
             return False
 
     def get_docker_args(self, version: AwesomeVersion, image: str | None = None):
-        """Create a dict with Docker build arguments."""
-        args = {
+        """Create a dict with Docker build arguments.
+
+        Must be run in executor.
+        """
+        args: dict[str, Any] = {
             "path": str(self.addon.path_location),
             "tag": f"{image or self.addon.image}:{version!s}",
-            "dockerfile": str(self.dockerfile),
+            "dockerfile": str(self.get_dockerfile()),
             "pull": True,
             "forcerm": not self.sys_dev,
             "squash": self.squash,

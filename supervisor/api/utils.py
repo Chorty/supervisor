@@ -1,4 +1,5 @@
 """Init file for Supervisor util for RESTful API."""
+
 import json
 from typing import Any
 
@@ -20,15 +21,15 @@ from ..const import (
     RESULT_ERROR,
     RESULT_OK,
 )
-from ..coresys import CoreSys
-from ..exceptions import APIError, APIForbidden, DockerAPIError, HassioError
+from ..coresys import CoreSys, CoreSysAttributes
+from ..exceptions import APIError, BackupFileNotFoundError, DockerAPIError, HassioError
 from ..utils import check_exception_chain, get_message_from_exception_chain
 from ..utils.json import json_dumps, json_loads as json_loads_util
 from ..utils.log_format import format_message
 from . import const
 
 
-def excract_supervisor_token(request: web.Request) -> str | None:
+def extract_supervisor_token(request: web.Request) -> str | None:
     """Extract Supervisor token from request."""
     if supervisor_token := request.headers.get(HEADER_TOKEN):
         return supervisor_token
@@ -57,12 +58,18 @@ def json_loads(data: Any) -> dict[str, Any]:
 def api_process(method):
     """Wrap function with true/false calls to rest api."""
 
-    async def wrap_api(api, *args, **kwargs):
+    async def wrap_api(
+        api: CoreSysAttributes, *args, **kwargs
+    ) -> web.Response | web.StreamResponse:
         """Return API information."""
         try:
             answer = await method(api, *args, **kwargs)
-        except (APIError, APIForbidden, HassioError) as err:
-            return api_return_error(error=err)
+        except BackupFileNotFoundError as err:
+            return api_return_error(err, status=404)
+        except APIError as err:
+            return api_return_error(err, status=err.status, job_id=err.job_id)
+        except HassioError as err:
+            return api_return_error(err)
 
         if isinstance(answer, (dict, list)):
             return api_return_ok(data=answer)
@@ -80,7 +87,7 @@ def api_process(method):
 def require_home_assistant(method):
     """Ensure that the request comes from Home Assistant."""
 
-    async def wrap_api(api, *args, **kwargs):
+    async def wrap_api(api: CoreSysAttributes, *args, **kwargs) -> Any:
         """Return API information."""
         coresys: CoreSys = api.coresys
         request: Request = args[0]
@@ -97,10 +104,19 @@ def api_process_raw(content, *, error_type=None):
     def wrap_method(method):
         """Wrap function with raw output to rest api."""
 
-        async def wrap_api(api, *args, **kwargs):
+        async def wrap_api(
+            api: CoreSysAttributes, *args, **kwargs
+        ) -> web.Response | web.StreamResponse:
             """Return api information."""
             try:
                 msg_data = await method(api, *args, **kwargs)
+            except APIError as err:
+                return api_return_error(
+                    err,
+                    error_type=error_type or const.CONTENT_TYPE_BINARY,
+                    status=err.status,
+                    job_id=err.job_id,
+                )
             except HassioError as err:
                 return api_return_error(
                     err, error_type=error_type or const.CONTENT_TYPE_BINARY
@@ -120,6 +136,8 @@ def api_return_error(
     error: Exception | None = None,
     message: str | None = None,
     error_type: str | None = None,
+    status: int = 400,
+    job_id: str | None = None,
 ) -> web.Response:
     """Return an API error message."""
     if error and not message:
@@ -128,10 +146,6 @@ def api_return_error(
             message = format_message(message)
     if not message:
         message = "Unknown error, see supervisor"
-
-    status = 400
-    if is_api_error := isinstance(error, APIError):
-        status = error.status
 
     match error_type:
         case const.CONTENT_TYPE_TEXT:
@@ -145,8 +159,8 @@ def api_return_error(
                 JSON_RESULT: RESULT_ERROR,
                 JSON_MESSAGE: message,
             }
-            if is_api_error and error.job_id:
-                result[JSON_JOB_ID] = error.job_id
+            if job_id:
+                result[JSON_JOB_ID] = job_id
 
     return web.json_response(
         result,
@@ -155,7 +169,7 @@ def api_return_error(
     )
 
 
-def api_return_ok(data: dict[str, Any] | None = None) -> web.Response:
+def api_return_ok(data: dict[str, Any] | list[Any] | None = None) -> web.Response:
     """Return an API ok answer."""
     return web.json_response(
         {JSON_RESULT: RESULT_OK, JSON_DATA: data or {}},
@@ -164,7 +178,9 @@ def api_return_ok(data: dict[str, Any] | None = None) -> web.Response:
 
 
 async def api_validate(
-    schema: vol.Schema, request: web.Request, origin: list[str] | None = None
+    schema: vol.Schema | vol.All,
+    request: web.Request,
+    origin: list[str] | None = None,
 ) -> dict[str, Any]:
     """Validate request data with schema."""
     data: dict[str, Any] = await request.json(loads=json_loads)

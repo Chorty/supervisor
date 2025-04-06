@@ -1,6 +1,9 @@
 """Home Assistant control object."""
+
 import asyncio
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
 from typing import Any
@@ -8,6 +11,7 @@ from typing import Any
 import aiohttp
 from aiohttp import hdrs
 from awesomeversion import AwesomeVersion
+from multidict import MultiMapping
 
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import HomeAssistantAPIError, HomeAssistantAuthError
@@ -19,6 +23,14 @@ from .const import LANDINGPAGE
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 GET_CORE_STATE_MIN_VERSION: AwesomeVersion = AwesomeVersion("2023.8.0.dev20230720")
+
+
+@dataclass(frozen=True)
+class APIState:
+    """Container for API state response."""
+
+    core_state: str
+    offline_db_migration: bool
 
 
 class HomeAssistantAPI(CoreSysAttributes):
@@ -74,10 +86,10 @@ class HomeAssistantAPI(CoreSysAttributes):
         json: dict[str, Any] | None = None,
         content_type: str | None = None,
         data: Any = None,
-        timeout: int = 30,
-        params: dict[str, str] | None = None,
+        timeout: int | None = 30,
+        params: MultiMapping[str] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> AbstractAsyncContextManager[aiohttp.ClientResponse]:
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
         """Async context manager to make a request with right auth."""
         url = f"{self.sys_homeassistant.api_url}/{path}"
         headers = headers or {}
@@ -132,7 +144,7 @@ class HomeAssistantAPI(CoreSysAttributes):
         """Return Home Assistant core state."""
         return await self._get_json("api/core/state")
 
-    async def get_api_state(self) -> str | None:
+    async def get_api_state(self) -> APIState | None:
         """Return state of Home Assistant Core or None."""
         # Skip check on landingpage
         if (
@@ -161,12 +173,17 @@ class HomeAssistantAPI(CoreSysAttributes):
                 data = await self.get_config()
             # Older versions of home assistant does not expose the state
             if data:
-                return data.get("state", "RUNNING")
+                state = data.get("state", "RUNNING")
+                # Recorder state was added in HA Core 2024.8
+                recorder_state = data.get("recorder_state", {})
+                migrating = recorder_state.get("migration_in_progress", False)
+                live_migration = recorder_state.get("migration_is_live", False)
+                return APIState(state, migrating and not live_migration)
 
         return None
 
     async def check_api_state(self) -> bool:
         """Return Home Assistant Core state if up."""
         if state := await self.get_api_state():
-            return state == "RUNNING"
+            return state.core_state == "RUNNING" or state.offline_db_migration
         return False

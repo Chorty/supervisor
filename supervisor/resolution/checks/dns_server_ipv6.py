@@ -1,4 +1,5 @@
 """Helpers to check DNS servers for IPv6 errors."""
+
 import asyncio
 from datetime import timedelta
 
@@ -9,7 +10,7 @@ from ...const import CoreState
 from ...coresys import CoreSys
 from ...jobs.const import JobCondition, JobExecutionLimit
 from ...jobs.decorator import Job
-from ...utils.sentry import capture_exception
+from ...utils.sentry import async_capture_exception
 from ..const import DNS_CHECK_HOST, DNS_ERROR_NO_DATA, ContextType, IssueType
 from .base import CheckBase
 
@@ -46,7 +47,7 @@ class CheckDNSServerIPv6(CheckBase):
                 ContextType.DNS_SERVER,
                 reference=dns_servers[i],
             )
-            capture_exception(results[i])
+            await async_capture_exception(results[i])
 
     @Job(
         name="check_dns_server_ipv6_approve", conditions=[JobCondition.INTERNET_SYSTEM]

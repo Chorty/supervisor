@@ -1,5 +1,7 @@
 """Init file for Supervisor auth/SSO RESTful API."""
+
 import asyncio
+from collections.abc import Awaitable
 import logging
 from typing import Any
 
@@ -41,7 +43,7 @@ REALM_HEADER: dict[str, str] = {
 class APIAuth(CoreSysAttributes):
     """Handle RESTful API for auth functions."""
 
-    def _process_basic(self, request: web.Request, addon: Addon) -> bool:
+    def _process_basic(self, request: web.Request, addon: Addon) -> Awaitable[bool]:
         """Process login request with basic auth.
 
         Return a coroutine.
@@ -51,7 +53,7 @@ class APIAuth(CoreSysAttributes):
 
     def _process_dict(
         self, request: web.Request, addon: Addon, data: dict[str, str]
-    ) -> bool:
+    ) -> Awaitable[bool]:
         """Process login with dict data.
 
         Return a coroutine.
@@ -98,7 +100,7 @@ class APIAuth(CoreSysAttributes):
     @api_process
     async def cache(self, request: web.Request) -> None:
         """Process cache reset request."""
-        self.sys_auth.reset_data()
+        await self.sys_auth.reset_data()
 
     @api_process
     async def list_users(self, request: web.Request) -> dict[str, list[dict[str, Any]]]:

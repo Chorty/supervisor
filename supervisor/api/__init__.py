@@ -1,16 +1,17 @@
 """Init file for Supervisor RESTful API."""
+
+from dataclasses import dataclass
 from functools import partial
 import logging
 from pathlib import Path
 from typing import Any
 
-from aiohttp import web
-from aiohttp_fast_url_dispatcher import FastUrlDispatcher, attach_fast_url_dispatcher
+from aiohttp import hdrs, web
 
 from ..const import AddonState
 from ..coresys import CoreSys, CoreSysAttributes
-from ..exceptions import APIAddonNotInstalled
-from ..utils.sentry import capture_exception
+from ..exceptions import APIAddonNotInstalled, HostNotSupportedError
+from ..utils.sentry import async_capture_exception
 from .addons import APIAddons
 from .audio import APIAudio
 from .auth import APIAuth
@@ -47,6 +48,14 @@ MAX_CLIENT_SIZE: int = 1024**2 * 16
 MAX_LINE_SIZE: int = 24570
 
 
+@dataclass(slots=True, frozen=True)
+class StaticResourceConfig:
+    """Configuration for a static resource."""
+
+    prefix: str
+    path: Path
+
+
 class RestAPI(CoreSysAttributes):
     """Handle RESTful API for Supervisor."""
 
@@ -67,19 +76,18 @@ class RestAPI(CoreSysAttributes):
                 "max_field_size": MAX_LINE_SIZE,
             },
         )
-        attach_fast_url_dispatcher(self.webapp, FastUrlDispatcher())
 
         # service stuff
         self._runner: web.AppRunner = web.AppRunner(self.webapp, shutdown_timeout=5)
         self._site: web.TCPSite | None = None
 
         # share single host API handler for reuse in logging endpoints
-        self._api_host: APIHost | None = None
+        self._api_host: APIHost = APIHost()
+        self._api_host.coresys = coresys
 
     async def load(self) -> None:
         """Register REST API Calls."""
-        self._api_host = APIHost()
-        self._api_host.coresys = self.coresys
+        static_resource_configs: list[StaticResourceConfig] = []
 
         self._register_addons()
         self._register_audio()
@@ -99,7 +107,7 @@ class RestAPI(CoreSysAttributes):
         self._register_network()
         self._register_observer()
         self._register_os()
-        self._register_panel()
+        static_resource_configs.extend(self._register_panel())
         self._register_proxy()
         self._register_resolution()
         self._register_root()
@@ -107,6 +115,17 @@ class RestAPI(CoreSysAttributes):
         self._register_services()
         self._register_store()
         self._register_supervisor()
+
+        if static_resource_configs:
+
+            def process_configs() -> list[web.StaticResource]:
+                return [
+                    web.StaticResource(config.prefix, config.path)
+                    for config in static_resource_configs
+                ]
+
+            for resource in await self.sys_run_in_executor(process_configs):
+                self.webapp.router.register_resource(resource)
 
         await self.start()
 
@@ -218,6 +237,8 @@ class RestAPI(CoreSysAttributes):
             [
                 web.get("/os/info", api_os.info),
                 web.post("/os/update", api_os.update),
+                web.get("/os/config/swap", api_os.config_swap_info),
+                web.post("/os/config/swap", api_os.config_swap_options),
                 web.post("/os/config/sync", api_os.config_sync),
                 web.post("/os/datadisk/move", api_os.migrate_data),
                 web.get("/os/datadisk/list", api_os.list_data),
@@ -401,7 +422,7 @@ class RestAPI(CoreSysAttributes):
 
         async def get_supervisor_logs(*args, **kwargs):
             try:
-                return await self._api_host.advanced_logs(
+                return await self._api_host.advanced_logs_handler(
                     *args, identifier="hassio_supervisor", **kwargs
                 )
             except Exception as err:  # pylint: disable=broad-exception-caught
@@ -410,7 +431,11 @@ class RestAPI(CoreSysAttributes):
                 _LOGGER.exception(
                     "Failed to get supervisor logs using advanced_logs API"
                 )
-                capture_exception(err)
+                if not isinstance(err, HostNotSupportedError):
+                    # No need to capture HostNotSupportedError to Sentry, the cause
+                    # is known and reported to the user using the resolution center.
+                    await async_capture_exception(err)
+                kwargs.pop("follow", None)  # Follow is not supported for Docker logs
                 return await api_supervisor.logs(*args, **kwargs)
 
         self.webapp.add_routes(
@@ -501,12 +526,13 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/addons", api_addons.list),
+                web.get("/addons", api_addons.list_addons),
                 web.post("/addons/{addon}/uninstall", api_addons.uninstall),
                 web.post("/addons/{addon}/start", api_addons.start),
                 web.post("/addons/{addon}/stop", api_addons.stop),
                 web.post("/addons/{addon}/restart", api_addons.restart),
                 web.post("/addons/{addon}/options", api_addons.options),
+                web.post("/addons/{addon}/sys_options", api_addons.sys_options),
                 web.post(
                     "/addons/{addon}/options/validate", api_addons.options_validate
                 ),
@@ -568,7 +594,9 @@ class RestAPI(CoreSysAttributes):
                 web.post("/ingress/session", api_ingress.create_session),
                 web.post("/ingress/validate_session", api_ingress.validate_session),
                 web.get("/ingress/panels", api_ingress.panels),
-                web.view("/ingress/{token}/{path:.*}", api_ingress.handler),
+                web.route(
+                    hdrs.METH_ANY, "/ingress/{token}/{path:.*}", api_ingress.handler
+                ),
             ]
         )
 
@@ -579,7 +607,7 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/backups", api_backups.list),
+                web.get("/backups", api_backups.list_backups),
                 web.get("/backups/info", api_backups.info),
                 web.post("/backups/options", api_backups.options),
                 web.post("/backups/reload", api_backups.reload),
@@ -606,7 +634,7 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/services", api_services.list),
+                web.get("/services", api_services.list_services),
                 web.get("/services/{service}", api_services.get_service),
                 web.post("/services/{service}", api_services.set_service),
                 web.delete("/services/{service}", api_services.del_service),
@@ -620,7 +648,7 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/discovery", api_discovery.list),
+                web.get("/discovery", api_discovery.list_discovery),
                 web.get("/discovery/{uuid}", api_discovery.get_discovery),
                 web.delete("/discovery/{uuid}", api_discovery.del_discovery),
                 web.post("/discovery", api_discovery.set_discovery),
@@ -694,7 +722,6 @@ class RestAPI(CoreSysAttributes):
                 web.get("/store", api_store.store_info),
                 web.get("/store/addons", api_store.addons_list),
                 web.get("/store/addons/{addon}", api_store.addons_addon_info),
-                web.get("/store/addons/{addon}/{version}", api_store.addons_addon_info),
                 web.get("/store/addons/{addon}/icon", api_store.addons_addon_icon),
                 web.get("/store/addons/{addon}/logo", api_store.addons_addon_logo),
                 web.get(
@@ -716,6 +743,8 @@ class RestAPI(CoreSysAttributes):
                     "/store/addons/{addon}/update/{version}",
                     api_store.addons_addon_update,
                 ),
+                # Must be below others since it has a wildcard in resource path
+                web.get("/store/addons/{addon}/{version}", api_store.addons_addon_info),
                 web.post("/store/reload", api_store.reload),
                 web.get("/store/repositories", api_store.repositories_list),
                 web.get(
@@ -745,10 +774,9 @@ class RestAPI(CoreSysAttributes):
             ]
         )
 
-    def _register_panel(self) -> None:
+    def _register_panel(self) -> list[StaticResourceConfig]:
         """Register panel for Home Assistant."""
-        panel_dir = Path(__file__).parent.joinpath("panel")
-        self.webapp.add_routes([web.static("/app", panel_dir)])
+        return [StaticResourceConfig("/app", Path(__file__).parent.joinpath("panel"))]
 
     def _register_docker(self) -> None:
         """Register docker configuration functions."""

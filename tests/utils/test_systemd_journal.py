@@ -1,6 +1,7 @@
 """Test systemd journal utilities."""
+
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -49,9 +50,9 @@ def test_format_verbose_timestamp():
         "MESSAGE": "x",
     }
     formatted = journal_verbose_formatter(fields)
-    assert formatted.startswith(
-        "1970-01-01 00:00:00.001 "
-    ), f"Invalid log timestamp: {formatted}"
+    assert formatted.startswith("1970-01-01 00:00:00.001 "), (
+        f"Invalid log timestamp: {formatted}"
+    )
 
 
 def test_format_verbose():
@@ -88,7 +89,7 @@ async def test_parsing_simple():
     """Test plain formatter."""
     journal_logs, stream = _journal_logs_mock()
     stream.feed_data(b"MESSAGE=Hello, world!\n\n")
-    line = await anext(journal_logs_reader(journal_logs))
+    _, line = await anext(journal_logs_reader(journal_logs))
     assert line == "Hello, world!"
 
 
@@ -102,7 +103,7 @@ async def test_parsing_verbose():
         b"_PID=666\n"
         b"MESSAGE=Hello, world!\n\n"
     )
-    line = await anext(
+    _, line = await anext(
         journal_logs_reader(journal_logs, log_formatter=LogFormatter.VERBOSE)
     )
     assert line == "2013-09-17 07:32:51.000 homeassistant python[666]: Hello, world!"
@@ -117,7 +118,7 @@ async def test_parsing_newlines_in_message():
         b"AFTER=after\n\n"
     )
 
-    line = await anext(journal_logs_reader(journal_logs))
+    _, line = await anext(journal_logs_reader(journal_logs))
     assert line == "Hello,\nworld!"
 
 
@@ -134,24 +135,44 @@ async def test_parsing_newlines_in_multiple_fields():
         b"AFTER=after\n\n"
     )
 
-    assert await anext(journal_logs_reader(journal_logs)) == "Hello,\nworld!\n"
-    assert await anext(journal_logs_reader(journal_logs)) == "Hello,\nworld!"
+    assert await anext(journal_logs_reader(journal_logs)) == (ANY, "Hello,\nworld!\n")
+    assert await anext(journal_logs_reader(journal_logs)) == (ANY, "Hello,\nworld!")
 
 
 async def test_parsing_two_messages():
     """Test reading multiple messages."""
     journal_logs, stream = _journal_logs_mock()
     stream.feed_data(
+        b"MESSAGE=Hello, world!\nID=1\n\nMESSAGE=Hello again, world!\nID=2\n\n"
+    )
+    stream.feed_eof()
+
+    reader = journal_logs_reader(journal_logs)
+    assert await anext(reader) == (ANY, "Hello, world!")
+    assert await anext(reader) == (ANY, "Hello again, world!")
+    with pytest.raises(StopAsyncIteration):
+        await anext(reader)
+
+
+async def test_cursor_parsing():
+    """Test cursor is extracted correctly."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_data(
+        b"__CURSOR=cursor1\n"
         b"MESSAGE=Hello, world!\n"
         b"ID=1\n\n"
+        b"__CURSOR=cursor2\n"
         b"MESSAGE=Hello again, world!\n"
+        b"ID=2\n\n"
+        b"MESSAGE=No cursor\n"
         b"ID=2\n\n"
     )
     stream.feed_eof()
 
     reader = journal_logs_reader(journal_logs)
-    assert await anext(reader) == "Hello, world!"
-    assert await anext(reader) == "Hello again, world!"
+    assert await anext(reader) == ("cursor1", "Hello, world!")
+    assert await anext(reader) == ("cursor2", "Hello again, world!")
+    assert await anext(reader) == (None, "No cursor")
     with pytest.raises(StopAsyncIteration):
         await anext(reader)
 
@@ -160,9 +181,7 @@ async def test_parsing_malformed_binary_message():
     """Test that malformed binary message raises MalformedBinaryEntryError."""
     journal_logs, stream = _journal_logs_mock()
     stream.feed_data(
-        b"ID=1\n"
-        b"MESSAGE\n\x0d\x00\x00\x00\x00\x00\x00\x00Hello, world!"
-        b"AFTER=after\n\n"
+        b"ID=1\nMESSAGE\n\x0d\x00\x00\x00\x00\x00\x00\x00Hello, world!AFTER=after\n\n"
     )
 
     with pytest.raises(MalformedBinaryEntryError):
@@ -173,7 +192,7 @@ async def test_parsing_journal_host_logs():
     """Test parsing of real host logs."""
     journal_logs, stream = _journal_logs_mock()
     stream.feed_data(load_fixture("logs_export_host.txt").encode("utf-8"))
-    line = await anext(journal_logs_reader(journal_logs))
+    _, line = await anext(journal_logs_reader(journal_logs))
     assert line == "Started Hostname Service."
 
 
@@ -181,7 +200,7 @@ async def test_parsing_colored_supervisor_logs():
     """Test parsing of real logs with ANSI escape sequences."""
     journal_logs, stream = _journal_logs_mock()
     stream.feed_data(load_fixture("logs_export_supervisor.txt").encode("utf-8"))
-    line = await anext(journal_logs_reader(journal_logs))
+    _, line = await anext(journal_logs_reader(journal_logs))
     assert (
         line
         == "\x1b[32m24-03-04 23:56:56 INFO (MainThread) [__main__] Closing Supervisor\x1b[0m"

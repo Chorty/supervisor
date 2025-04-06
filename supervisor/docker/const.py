@@ -1,5 +1,7 @@
 """Docker constants."""
+
 from enum import StrEnum
+from pathlib import PurePath
 
 from docker.types import Mount
 
@@ -10,6 +12,7 @@ class Capabilities(StrEnum):
     """Linux Capabilities."""
 
     BPF = "BPF"
+    CHECKPOINT_RESTORE = "CHECKPOINT_RESTORE"
     DAC_READ_SEARCH = "DAC_READ_SEARCH"
     IPC_LOCK = "IPC_LOCK"
     NET_ADMIN = "NET_ADMIN"
@@ -90,3 +93,15 @@ MOUNT_MACHINE_ID = Mount(
 MOUNT_UDEV = Mount(
     type=MountType.BIND, source="/run/udev", target="/run/udev", read_only=True
 )
+
+PATH_PRIVATE_DATA = PurePath("/data")
+PATH_HOMEASSISTANT_CONFIG_LEGACY = PurePath("/config")
+PATH_HOMEASSISTANT_CONFIG = PurePath("/homeassistant")
+PATH_PUBLIC_CONFIG = PurePath("/config")
+PATH_ALL_ADDON_CONFIGS = PurePath("/addon_configs")
+PATH_SSL = PurePath("/ssl")
+PATH_LOCAL_ADDONS = PurePath("/addons")
+PATH_BACKUP = PurePath("/backup")
+PATH_SHARE = PurePath("/share")
+PATH_MEDIA = PurePath("/media")
+PATH_CLOUD_BACKUP = PurePath("/cloud_backup")

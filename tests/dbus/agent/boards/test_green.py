@@ -21,19 +21,22 @@ async def fixture_green_service(dbus_session_bus: MessageBus) -> GreenService:
 
 async def test_dbus_green(green_service: GreenService, dbus_session_bus: MessageBus):
     """Test Green board load."""
-    green = Green()
+    green = await Green().load_config()
     await green.connect(dbus_session_bus)
 
-    assert green.name == "Green"
+    assert green.board_name == "Green"
     assert green.activity_led is True
     assert green.power_led is True
     assert green.user_led is True
 
-    with patch("supervisor.utils.common.Path.is_file", return_value=True), patch(
-        "supervisor.utils.common.read_json_file",
-        return_value={"activity_led": False, "user_led": False},
+    with (
+        patch("supervisor.utils.common.Path.is_file", return_value=True),
+        patch(
+            "supervisor.utils.common.read_json_file",
+            return_value={"activity_led": False, "user_led": False},
+        ),
     ):
-        green = Green()
+        green = await Green().load_config()
     await green.connect(dbus_session_bus)
 
     assert green.activity_led is False
@@ -44,7 +47,7 @@ async def test_dbus_green_set_activity_led(
     green_service: GreenService, dbus_session_bus: MessageBus
 ):
     """Test setting activity led for Green board."""
-    green = Green()
+    green = await Green().load_config()
     await green.connect(dbus_session_bus)
 
     await green.set_activity_led(False)
@@ -56,7 +59,7 @@ async def test_dbus_green_set_power_led(
     green_service: GreenService, dbus_session_bus: MessageBus
 ):
     """Test setting power led for Green board."""
-    green = Green()
+    green = await Green().load_config()
     await green.connect(dbus_session_bus)
 
     await green.set_power_led(False)
@@ -68,7 +71,7 @@ async def test_dbus_green_set_user_led(
     green_service: GreenService, dbus_session_bus: MessageBus
 ):
     """Test setting user led for Green board."""
-    green = Green()
+    green = await Green().load_config()
     await green.connect(dbus_session_bus)
 
     await green.set_user_led(False)

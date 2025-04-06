@@ -1,4 +1,5 @@
 """Init file for Supervisor add-on data."""
+
 from dataclasses import dataclass
 import errno
 import logging
@@ -10,7 +11,7 @@ from voluptuous.humanize import humanize_error
 
 from ..addons.validate import SCHEMA_ADDON_CONFIG, SCHEMA_ADDON_TRANSLATIONS
 from ..const import (
-    ATTR_LOCATON,
+    ATTR_LOCATION,
     ATTR_REPOSITORY,
     ATTR_SLUG,
     ATTR_TRANSLATIONS,
@@ -73,7 +74,10 @@ def _read_addon_translations(addon_path: Path) -> dict:
 
 
 def _read_git_repository(path: Path) -> ProcessedRepository | None:
-    """Process a custom repository folder."""
+    """Process a custom repository folder.
+
+    Must be run in executor.
+    """
     slug = extract_hash_from_path(path)
 
     # exists repository json
@@ -175,7 +179,9 @@ class StoreData(CoreSysAttributes):
         except OSError as err:
             suggestion = None
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             elif path.stem != StoreType.LOCAL:
                 suggestion = [SuggestionType.EXECUTE_RESET]
             self.sys_resolution.create_issue(
@@ -222,7 +228,7 @@ class StoreData(CoreSysAttributes):
 
                 # store
                 addon_config[ATTR_REPOSITORY] = repository
-                addon_config[ATTR_LOCATON] = str(addon.parent)
+                addon_config[ATTR_LOCATION] = str(addon.parent)
                 addon_config[ATTR_TRANSLATIONS] = _read_addon_translations(addon.parent)
                 addons_config[addon_slug] = addon_config
 

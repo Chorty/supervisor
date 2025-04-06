@@ -1,4 +1,5 @@
 """Test clear full backup fixup."""
+
 # pylint: disable=import-error,protected-access
 from supervisor.backups.backup import Backup
 from supervisor.backups.const import BackupType
@@ -16,8 +17,8 @@ async def test_fixup(coresys: CoreSys, backups: list[Backup]):
 
     assert not clear_full_backup.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.CLEAR_FULL_BACKUP, ContextType.SYSTEM
+    coresys.resolution.add_suggestion(
+        Suggestion(SuggestionType.CLEAR_FULL_BACKUP, ContextType.SYSTEM)
     )
 
     newest_full_backup = coresys.backups._backups["sn4"]

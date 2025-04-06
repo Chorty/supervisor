@@ -1,4 +1,5 @@
 """Job decorator."""
+
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
@@ -17,7 +18,7 @@ from ..exceptions import (
 )
 from ..host.const import HostFeature
 from ..resolution.const import MINIMUM_FREE_SPACE_THRESHOLD, ContextType, IssueType
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from . import SupervisorJob
 from .const import JobCondition, JobExecutionLimit
 from .job_group import JobGroup
@@ -34,7 +35,7 @@ class Job(CoreSysAttributes):
         name: str,
         conditions: list[JobCondition] | None = None,
         cleanup: bool = True,
-        on_condition: JobException | None = None,
+        on_condition: type[JobException] | None = None,
         limit: JobExecutionLimit | None = None,
         throttle_period: timedelta
         | Callable[[CoreSys, datetime, list[datetime] | None], timedelta]
@@ -312,7 +313,7 @@ class Job(CoreSysAttributes):
                     except Exception as err:
                         _LOGGER.exception("Unhandled exception: %s", err)
                         job.capture_error()
-                        capture_exception(err)
+                        await async_capture_exception(err)
                         raise JobException() from err
                     finally:
                         self._release_exception_limits()
@@ -372,13 +373,14 @@ class Job(CoreSysAttributes):
 
         if (
             JobCondition.FREE_SPACE in used_conditions
-            and coresys.sys_host.info.free_space < MINIMUM_FREE_SPACE_THRESHOLD
+            and (free_space := await coresys.sys_host.info.free_space())
+            < MINIMUM_FREE_SPACE_THRESHOLD
         ):
             coresys.sys_resolution.create_issue(
                 IssueType.FREE_SPACE, ContextType.SYSTEM
             )
             raise JobConditionException(
-                f"'{method_name}' blocked from execution, not enough free space ({coresys.sys_host.info.free_space}GB) left on the device"
+                f"'{method_name}' blocked from execution, not enough free space ({free_space}GB) left on the device"
             )
 
         if JobCondition.INTERNET_SYSTEM in used_conditions:

@@ -1,4 +1,5 @@
 """Evaluation class for container."""
+
 import logging
 
 from docker.errors import DockerException
@@ -100,6 +101,6 @@ class EvaluateContainer(EvaluateBase):
                         "Found image in unhealthy image list '%s' on the host",
                         image_name,
                     )
-                    self.sys_resolution.unhealthy = UnhealthyReason.DOCKER
+                    self.sys_resolution.add_unhealthy_reason(UnhealthyReason.DOCKER)
 
         return len(self._images) != 0

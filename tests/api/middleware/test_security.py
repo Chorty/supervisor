@@ -1,4 +1,5 @@
 """Test API security layer."""
+
 import asyncio
 from http import HTTPStatus
 from unittest.mock import patch
@@ -22,7 +23,7 @@ async def mock_handler(request):
 
 
 @pytest.fixture
-async def api_system(aiohttp_client, run_dir, coresys: CoreSys) -> TestClient:
+async def api_system(aiohttp_client, coresys: CoreSys) -> TestClient:
     """Fixture for RestAPI client."""
     api = RestAPI(coresys)
     api.webapp = web.Application()
@@ -38,7 +39,7 @@ async def api_system(aiohttp_client, run_dir, coresys: CoreSys) -> TestClient:
 
 
 @pytest.fixture
-async def api_token_validation(aiohttp_client, run_dir, coresys: CoreSys) -> TestClient:
+async def api_token_validation(aiohttp_client, coresys: CoreSys) -> TestClient:
     """Fixture for RestAPI client with token validation middleware."""
     api = RestAPI(coresys)
     api.webapp = web.Application()
@@ -57,7 +58,7 @@ async def api_token_validation(aiohttp_client, run_dir, coresys: CoreSys) -> Tes
 @pytest.mark.asyncio
 async def test_api_security_system_initialize(api_system: TestClient, coresys: CoreSys):
     """Test security."""
-    coresys.core.state = CoreState.INITIALIZE
+    await coresys.core.set_state(CoreState.INITIALIZE)
 
     resp = await api_system.get("/supervisor/ping")
     result = await resp.json()
@@ -68,7 +69,7 @@ async def test_api_security_system_initialize(api_system: TestClient, coresys: C
 @pytest.mark.asyncio
 async def test_api_security_system_setup(api_system: TestClient, coresys: CoreSys):
     """Test security."""
-    coresys.core.state = CoreState.SETUP
+    await coresys.core.set_state(CoreState.SETUP)
 
     resp = await api_system.get("/supervisor/ping")
     result = await resp.json()
@@ -79,7 +80,7 @@ async def test_api_security_system_setup(api_system: TestClient, coresys: CoreSy
 @pytest.mark.asyncio
 async def test_api_security_system_running(api_system: TestClient, coresys: CoreSys):
     """Test security."""
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     resp = await api_system.get("/supervisor/ping")
     assert resp.status == 200
@@ -88,7 +89,7 @@ async def test_api_security_system_running(api_system: TestClient, coresys: Core
 @pytest.mark.asyncio
 async def test_api_security_system_startup(api_system: TestClient, coresys: CoreSys):
     """Test security."""
-    coresys.core.state = CoreState.STARTUP
+    await coresys.core.set_state(CoreState.STARTUP)
 
     resp = await api_system.get("/supervisor/ping")
     assert resp.status == 200
@@ -180,6 +181,8 @@ async def test_bad_requests(
         ("post", "/addons/abc123/restart", {"admin", "manager"}),
         ("post", "/addons/abc123/security", {"admin"}),
         ("post", "/os/datadisk/wipe", {"admin"}),
+        ("post", "/addons/self/sys_options", set()),
+        ("post", "/addons/abc123/sys_options", set()),
     ],
 )
 async def test_token_validation(
@@ -205,3 +208,12 @@ async def test_token_validation(
             request_path, headers={"Authorization": "Bearer abc123"}
         )
         assert resp.status == 403
+
+
+async def test_home_assistant_paths(api_token_validation: TestClient, coresys: CoreSys):
+    """Test Home Assistant only paths."""
+    coresys.homeassistant.supervisor_token = "abc123"
+    resp = await api_token_validation.post(
+        "/addons/local_test/sys_options", headers={"Authorization": "Bearer abc123"}
+    )
+    assert resp.status == 200

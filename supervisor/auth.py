@@ -1,4 +1,5 @@
 """Manage SSO for Add-ons with Home Assistant user."""
+
 import asyncio
 import hashlib
 import logging
@@ -45,7 +46,7 @@ class Auth(FileConfiguration, CoreSysAttributes):
             return True
         return False
 
-    def _update_cache(self, username: str, password: str) -> None:
+    async def _update_cache(self, username: str, password: str) -> None:
         """Cache a username, password."""
         username_h = self._rehash(username)
         password_h = self._rehash(password, username)
@@ -54,9 +55,9 @@ class Auth(FileConfiguration, CoreSysAttributes):
             return
 
         self._data[username_h] = password_h
-        self.save_data()
+        await self.save_data()
 
-    def _dismatch_cache(self, username: str, password: str) -> None:
+    async def _dismatch_cache(self, username: str, password: str) -> None:
         """Remove user from cache."""
         username_h = self._rehash(username)
         password_h = self._rehash(password, username)
@@ -65,9 +66,11 @@ class Auth(FileConfiguration, CoreSysAttributes):
             return
 
         self._data.pop(username_h, None)
-        self.save_data()
+        await self.save_data()
 
-    async def check_login(self, addon: Addon, username: str, password: str) -> bool:
+    async def check_login(
+        self, addon: Addon, username: str | None, password: str | None
+    ) -> bool:
         """Check username login."""
         if password is None:
             raise AuthError("None as password is not supported!", _LOGGER.error)
@@ -108,11 +111,11 @@ class Auth(FileConfiguration, CoreSysAttributes):
             ) as req:
                 if req.status == 200:
                     _LOGGER.info("Successful login for '%s'", username)
-                    self._update_cache(username, password)
+                    await self._update_cache(username, password)
                     return True
 
                 _LOGGER.warning("Unauthorized login for '%s'", username)
-                self._dismatch_cache(username, password)
+                await self._dismatch_cache(username, password)
                 return False
         except HomeAssistantAPIError:
             _LOGGER.error("Can't request auth on Home Assistant!")

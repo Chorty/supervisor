@@ -1,4 +1,5 @@
 """Evaluation class for Content Trust."""
+
 import errno
 import logging
 from pathlib import Path
@@ -50,7 +51,9 @@ class EvaluateSourceMods(EvaluateBase):
             )
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
 
             self.sys_resolution.create_issue(
                 IssueType.CORRUPT_FILESYSTEM, ContextType.SYSTEM

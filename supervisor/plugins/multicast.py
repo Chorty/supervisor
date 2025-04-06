@@ -2,6 +2,7 @@
 
 Code: https://github.com/home-assistant/plugin-multicast
 """
+
 import logging
 
 from awesomeversion import AwesomeVersion
@@ -18,7 +19,7 @@ from ..exceptions import (
 )
 from ..jobs.const import JobExecutionLimit
 from ..jobs.decorator import Job
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .base import PluginBase
 from .const import (
     FILE_HASSIO_MULTICAST,
@@ -44,7 +45,9 @@ class PluginMulticast(PluginBase):
     @property
     def default_image(self) -> str:
         """Return default image for multicast plugin."""
-        return self.sys_updater.image_multicast
+        if self.sys_updater.image_multicast:
+            return self.sys_updater.image_multicast
+        return super().default_image
 
     @property
     def latest_version(self) -> AwesomeVersion | None:
@@ -106,7 +109,7 @@ class PluginMulticast(PluginBase):
             await self.instance.install(self.version)
         except DockerError as err:
             _LOGGER.error("Repair of Multicast failed")
-            capture_exception(err)
+            await async_capture_exception(err)
 
     @Job(
         name="plugin_multicast_restart_after_problem",

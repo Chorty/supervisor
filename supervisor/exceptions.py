@@ -1,4 +1,5 @@
 """Core Exceptions."""
+
 from collections.abc import Callable
 
 
@@ -335,8 +336,20 @@ class APIForbidden(APIError):
     status = 403
 
 
+class APINotFound(APIError):
+    """API not found error."""
+
+    status = 404
+
+
 class APIAddonNotInstalled(APIError):
     """Not installed addon requested at addons API."""
+
+
+class APIDBMigrationInProgress(APIError):
+    """Service is unavailable due to an offline DB migration is in progress."""
+
+    status = 503
 
 
 # Service / Discovery
@@ -390,7 +403,11 @@ class DBusParseError(DBusError):
 
 
 class DBusTimeoutError(DBusError):
-    """D-Bus call timed out."""
+    """D-Bus call timeout."""
+
+
+class DBusTimedOutError(DBusError):
+    """D-Bus call timed out (typically when systemd D-Bus service activation fail)."""
 
 
 class DBusNoReplyError(DBusError):
@@ -638,8 +655,24 @@ class BackupMountDownError(BackupError):
     """Raise if mount specified for backup is down."""
 
 
+class BackupDataDiskBadMessageError(BackupError):
+    """Raise if bad message error received from data disk during backup."""
+
+
 class BackupJobError(BackupError, JobException):
     """Raise on Backup job error."""
+
+
+class BackupFileNotFoundError(BackupError):
+    """Raise if the backup file hasn't been found."""
+
+
+class BackupPermissionError(BackupError):
+    """Raise if we could not write the backup due to permission error."""
+
+
+class BackupFileExistError(BackupError):
+    """Raise if the backup file already exists."""
 
 
 # Security

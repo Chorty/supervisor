@@ -3,6 +3,7 @@
 from unittest.mock import PropertyMock, patch
 
 from awesomeversion import AwesomeVersion
+import pytest
 
 from supervisor.coresys import CoreSys
 from supervisor.docker.interface import DockerInterface
@@ -35,20 +36,23 @@ async def test_repair(coresys: CoreSys):
         assert install.call_count == len(coresys.plugins.all_plugins)
 
 
+@pytest.mark.usefixtures("no_job_throttle")
 async def test_load(coresys: CoreSys):
     """Test plugin manager load."""
     coresys.hardware.disk.get_disk_free_space = lambda x: 5000
     await coresys.updater.load()
 
     need_update = PropertyMock(return_value=True)
-    with patch.object(DockerInterface, "attach") as attach, patch.object(
-        DockerInterface, "update"
-    ) as update, patch.object(Supervisor, "need_update", new=need_update), patch.object(
-        PluginBase, "need_update", new=PropertyMock(return_value=True)
-    ), patch.object(
-        PluginBase,
-        "version",
-        new=PropertyMock(return_value=AwesomeVersion("1970-01-01")),
+    with (
+        patch.object(DockerInterface, "attach") as attach,
+        patch.object(DockerInterface, "update") as update,
+        patch.object(Supervisor, "need_update", new=need_update),
+        patch.object(PluginBase, "need_update", new=PropertyMock(return_value=True)),
+        patch.object(
+            PluginBase,
+            "version",
+            new=PropertyMock(return_value=AwesomeVersion("1970-01-01")),
+        ),
     ):
         await coresys.plugins.load()
 
